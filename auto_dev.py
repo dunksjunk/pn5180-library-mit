@@ -618,7 +618,13 @@ def collect(args: argparse.Namespace, sourcery, ledger: Ledger, iteration: int) 
     pending = delivered = False
     if sourcery is not None and not any(f.severity == "error" for f in found):
         log(f"asking Sourcery ({sourcery.name})")
-        s = sourcery.findings(iteration)
+        try:
+            s = sourcery.findings(iteration)
+        except (RuntimeError, OSError) as e:
+            # Network/auth/API trouble shouldn't kill a run that has paid for
+            # Claude turns: log it, treat the review as pending, keep going.
+            log(f"Sourcery unavailable this iteration: {e}")
+            s = None
         if s is None:
             pending = True
         else:
