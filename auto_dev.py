@@ -549,16 +549,32 @@ class Ledger:
 # --------------------------------------------------------------------------- #
 # Setup
 # --------------------------------------------------------------------------- #
+def find_pdftotext() -> str | None:
+    # Git for Windows / MSYS2 ship poppler's pdftotext but don't put it on the
+    # PowerShell/cmd PATH, so check their usual locations too.
+    candidates = [shutil.which("pdftotext"),
+                  r"C:\Program Files\Git\ucrt64\bin\pdftotext.exe",
+                  r"C:\Program Files\Git\mingw64\bin\pdftotext.exe",
+                  r"C:\msys64\ucrt64\bin\pdftotext.exe",
+                  r"C:\msys64\mingw64\bin\pdftotext.exe"]
+    return next((c for c in candidates if c and Path(c).is_file()), None)
+
+
 def extract_spec_text() -> None:
-    if not shutil.which("pdftotext"):
-        log("pdftotext not found; Claude will read the PDFs directly (slower, costlier)")
+    pdfs = list(SPECS.glob("*.pdf"))
+    stale = [p for p in pdfs if not (SPEC_TEXT / f"{p.stem}.txt").exists()
+             or (SPEC_TEXT / f"{p.stem}.txt").stat().st_mtime < p.stat().st_mtime]
+    if not stale:
         return
+    exe = find_pdftotext()
+    if not exe:
+        sys.exit("pdftotext not found and .specs/text/ is missing or stale. Install poppler "
+                 "(or Git for Windows' ucrt64 tools) - the author must not work without the spec text.")
     SPEC_TEXT.mkdir(parents=True, exist_ok=True)
-    for pdf in SPECS.glob("*.pdf"):
+    for pdf in stale:
         txt = SPEC_TEXT / f"{pdf.stem}.txt"
-        if not txt.exists() or txt.stat().st_mtime < pdf.stat().st_mtime:
-            log(f"extracting {pdf.name} -> {txt.relative_to(ROOT)}")
-            run(["pdftotext", "-layout", str(pdf), str(txt)])
+        log(f"extracting {pdf.name} -> {txt.relative_to(ROOT)}")
+        run([exe, "-layout", str(pdf), str(txt)])
 
 
 def preflight(args: argparse.Namespace) -> None:
