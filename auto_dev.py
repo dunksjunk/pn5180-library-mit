@@ -65,7 +65,7 @@ SPEC_TEXT = SPECS / "text"
 
 # ESP32 family first: classic (Xtensa LX6), S3 (Xtensa LX7, native USB), C3 (RISC-V).
 DEFAULT_FQBNS = ["esp32:esp32:esp32", "esp32:esp32:esp32s3", "esp32:esp32:esp32c3"]
-GH = shutil.which("gh") or r"C:Program FilesGitHub CLIgh.exe"  # winget installs here; PATH may lag
+GH = shutil.which("gh") or r"C:\Program Files\GitHub CLI\gh.exe"  # winget installs here; PATH may lag
 COMMIT_TRAILER = "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 # What the headless author may do. No web access (clean room), no git writes
