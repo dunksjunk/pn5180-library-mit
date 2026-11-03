@@ -1,0 +1,75 @@
+# ==========================================
+# Claude Code / Anthropic AI Agent
+# ==========================================
+# Single-contributor repo: keep all Claude config out of git
+.claude/
+CLAUDE.md
+CLAUDE.local.md
+claude_*.log
+claude-code.log
+
+# ==========================================
+# Arduino & ESP-IDF / PlatformIO Build Artifacts
+# ==========================================
+# Heavy build directories and compiled binaries
+build/
+.pio/
+.pioenvs/
+.piolibdeps/
+*.local.txt
+
+# Object files, static libraries, and executables
+*.o
+*.obj
+*.a
+*.lib
+*.elf
+*.bin
+*.hex
+*.map
+
+# ==========================================
+# C/C++ Configuration & Toolchain
+# ==========================================
+# Dependencies and package manager folders
+node_modules/
+.clang-format
+.gcc-flags.json
+
+# Toolchain tracking files
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+Makefile
+*.cmake
+
+# ==========================================
+# IDEs and Editors (VS Code / Clion / Arduino)
+# ==========================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ==========================================
+# Secrets and Credentials
+# ==========================================
+# Keep wifi passwords and private API keys safe
+include/secrets.h
+src/secrets.h
+*.env
+
+# ==========================================
+# Misc. Internal Specs Collection
+# ==========================================
+.specs/
+
+# auto_dev.py harness state (run logs, Sourcery inbox, dispute ledger)
+.autodev/
+
+# Python
+__pycache__/
+*.pyc
