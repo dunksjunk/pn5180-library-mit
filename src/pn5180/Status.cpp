@@ -15,6 +15,8 @@ const char* statusToString(Status s) {
         case Status::BufferTooSmall:  return "BufferTooSmall";
         case Status::WriteProtected:  return "WriteProtected";
         case Status::ChipError:       return "ChipError";
+        case Status::ReadOnly:        return "ReadOnly";
+        case Status::Unsupported:     return "Unsupported";
     }
     return "Unknown";
 }

@@ -124,6 +124,23 @@ constexpr bool isDocumented(uint8_t a) {
     return (a <= ANT_CONTROL && a != 0x06) || a == TX_CONTROL || a == SIGPRO_RM_CONFIG_EXTENSION ||
            a == FELICA_EMD_CONTROL;
 }
+
+// Registers whose every bit is documented with Access "R". Writing them is
+// rejected by the driver. (No register is entirely write-only: e.g. IRQ_CLEAR
+// bits are R/W per DS Table 78, SYSTEM_CONFIG mixes W and R/W per Table 75.)
+constexpr bool isReadOnly(uint8_t a) {
+    return a == IRQ_STATUS        // DS Table 77
+           || a == TIMER0_STATUS  // DS Table 82
+           || a == TIMER1_STATUS  // DS Table 83
+           || a == TIMER2_STATUS  // DS Table 84
+           || a == RX_STATUS      // DS Table 93
+           || a == RF_STATUS      // DS Table 103
+           || a == SYSTEM_STATUS; // DS Table 110
+}
+
+// FELICA_EMD_CONTROL exists only from firmware 4.1 (major 4, minor 1).  DS Table 74, Table 118
+constexpr uint8_t kFelicaEmdMinFwMajor = 4;
+constexpr uint8_t kFelicaEmdMinFwMinor = 1;
 }  // namespace reg
 
 // SYSTEM_CONFIG bits

@@ -18,7 +18,9 @@ enum class Status : uint8_t {
     HalError,          // the platform layer reported an SPI/GPIO failure
     BufferTooSmall,    // a fixed-size internal or caller buffer is too small
     WriteProtected,    // guarded operation (e.g. EEPROM write) not unlocked
-    ChipError,         // the PN5180 reported an error condition
+    ChipError,         // the PN5180 raised GENERAL_ERROR_IRQ for the command
+    ReadOnly,          // write attempted to a read-only register
+    Unsupported,       // not available on the detected firmware version
 };
 
 // Human-readable name for logging. Never returns nullptr.
