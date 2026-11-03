@@ -65,6 +65,7 @@ SPEC_TEXT = SPECS / "text"
 
 # ESP32 family first: classic (Xtensa LX6), S3 (Xtensa LX7, native USB), C3 (RISC-V).
 DEFAULT_FQBNS = ["esp32:esp32:esp32", "esp32:esp32:esp32s3", "esp32:esp32:esp32c3"]
+GH = shutil.which("gh") or r"C:Program FilesGitHub CLIgh.exe"  # winget installs here; PATH may lag
 COMMIT_TRAILER = "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 # What the headless author may do. No web access (clean room), no git writes
@@ -367,7 +368,7 @@ class SourceryPR:
         if not self.key:
             sys.exit("--sourcery pr needs the SOURCERY_API_KEY environment variable")
         if not repo:
-            repo = run(["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"]).stdout.strip()
+            repo = run([GH, "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"]).stdout.strip()
             if not repo:
                 sys.exit("Could not determine the GitHub repo; pass --sourcery-repo owner/name")
         self.repo, self.pr, self.remote, self.base, self.timeout_s = repo, pr, remote, base, timeout_s
@@ -375,12 +376,12 @@ class SourceryPR:
     def _ensure_pr(self, branch: str) -> int:
         if self.pr:
             return self.pr
-        r = run(["gh", "pr", "view", branch, "--json", "number,state", "-q", "select(.state==\"OPEN\") | .number"])
+        r = run([GH, "pr", "view", branch, "--json", "number,state", "-q", "select(.state==\"OPEN\") | .number"])
         if r.stdout.strip().isdigit():
             self.pr = int(r.stdout.strip())
         else:
             log(f"  opening PR {branch} -> {self.base}")
-            r = run(["gh", "pr", "create", "--base", self.base, "--head", branch,
+            r = run([GH, "pr", "create", "--base", self.base, "--head", branch,
                      "--title", f"autodev: {branch}",
                      "--body", "Automated auto_dev.py work branch, reviewed by Sourcery each iteration.\n\n"
                                "🤖 Generated with [Claude Code](https://claude.com/claude-code)"])
