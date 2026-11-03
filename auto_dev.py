@@ -655,7 +655,8 @@ def preflight(args: argparse.Namespace) -> None:
 def revert_protected() -> list[str]:
     """Undo any author edits to the harness itself. Returns the paths reverted."""
     reverted = []
-    for line in git("status", "--porcelain", "--untracked-files=all").splitlines():
+    # Not git(): its .strip() would eat the leading status column of line one.
+    for line in run(["git", "status", "--porcelain", "--untracked-files=all"]).stdout.splitlines():
         path = line[3:].strip().strip('"')
         if not any(path == p or path.startswith(p) for p in PROTECTED_PATHS):
             continue
@@ -848,3 +849,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+# tamper
