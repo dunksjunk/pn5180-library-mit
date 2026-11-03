@@ -68,6 +68,12 @@ DEFAULT_FQBNS = ["esp32:esp32:esp32", "esp32:esp32:esp32s3", "esp32:esp32:esp32c
 GH = shutil.which("gh") or r"C:\Program Files\GitHub CLI\gh.exe"  # winget installs here; PATH may lag
 COMMIT_TRAILER = "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
+# Sourcery comments outside these paths are about tooling, not the driver:
+# they are logged for the human and never handed to the author.
+REVIEW_SCOPE = ("src/", "examples/", "tests/", "library.properties", "keywords.txt", "CMakeLists.txt")
+# The harness itself. Author edits here are reverted after every turn.
+PROTECTED_PATHS = ("auto_dev.py", "tools/")
+
 # What the headless author may do. No web access (clean room), no git writes
 # (the harness owns checkpoints), no arbitrary shell.
 CLAUDE_ALLOWED_TOOLS = [
@@ -127,6 +133,11 @@ HOW THIS LOOP WORKS:
   may dispute it with a concrete, spec-grounded reason; a human adjudicates.
 - When there are no findings, keep advancing the task.
 - Do not run git commit/add/checkout; the harness checkpoints for you.
+- Never modify auto_dev.py or anything under tools/ - that is the harness
+  supervising you; any change there is reverted automatically.
+- A hardware-in-the-loop gate may flash an example to the real test bed and
+  check its serial output. Its findings are real hardware behaviour - treat
+  them as ground truth and debug against the data sheet, not around them.
 - End every turn with the structured result. Set status "done" only when the
   whole task is complete, "blocked" when you need a human decision.
 """
@@ -531,21 +542,42 @@ def build_prompt(iteration: int, task: str, findings: list[Finding], n_disputed:
 # Ledger / run log
 # --------------------------------------------------------------------------- #
 class Ledger:
-    """Persistent record of disputed findings, keyed by fingerprint."""
+    """Persistent record of disputed findings, keyed by fingerprint.
+
+    status: "disputed" - Claude objected, waiting for a human (hidden meanwhile)
+            "upheld"   - human agreed with Claude; suppressed for good
+            "rejected" - human sided with the reviewer; finding comes back and
+                         Claude may not dispute it again
+    """
 
     def __init__(self) -> None:
         self.path = STATE / "ledger.json"
         self.data: dict = json.loads(self.path.read_text("utf-8")) if self.path.exists() else {}
 
+    def _with(self, status: str) -> set[str]:
+        return {fp for fp, v in self.data.items() if v.get("status") == status}
+
     def disputed(self) -> set[str]:
-        return {fp for fp, v in self.data.items() if v.get("status") == "disputed"}
+        return self._with("disputed")
+
+    def suppressed(self) -> set[str]:
+        return self._with("disputed") | self._with("upheld")
+
+    def adjudicate(self, fp: str, verdict: str) -> None:
+        if fp not in self.data:
+            sys.exit(f"--adjudicate: no ledger entry {fp}")
+        if verdict not in ("upheld", "rejected"):
+            sys.exit(f"--adjudicate: verdict must be upheld or rejected, not {verdict!r}")
+        self.data[fp]["status"] = verdict
+        self.data[fp]["adjudicated_at"] = datetime.now().isoformat(timespec="seconds")
+        self.path.write_text(json.dumps(self.data, indent=2), "utf-8")
 
     def record(self, disputes: list[dict], findings: list[Finding], iteration: int) -> list[str]:
         by_id = {f.fingerprint: f for f in findings}
         rejected = []
         for d in disputes:
             f = by_id.get(d.get("id", "").strip("[]"))
-            if f is None or not f.disputable:
+            if f is None or not f.disputable or self.data.get(f.fingerprint, {}).get("status") == "rejected":
                 rejected.append(d.get("id", "?"))
                 continue
             self.data[f.fingerprint] = {"status": "disputed", "reason": d.get("reason", ""),
@@ -620,6 +652,21 @@ def preflight(args: argparse.Namespace) -> None:
         git("checkout", "-b", new)
 
 
+def revert_protected() -> list[str]:
+    """Undo any author edits to the harness itself. Returns the paths reverted."""
+    reverted = []
+    for line in git("status", "--porcelain", "--untracked-files=all").splitlines():
+        path = line[3:].strip().strip('"')
+        if not any(path == p or path.startswith(p) for p in PROTECTED_PATHS):
+            continue
+        if line.startswith("??"):
+            (ROOT / path).unlink(missing_ok=True)
+        else:
+            git("checkout", "HEAD", "--", path)
+        reverted.append(path)
+    return reverted
+
+
 def checkpoint(iteration: int, summary: str) -> bool:
     if not git("status", "--porcelain"):
         return False
@@ -635,7 +682,9 @@ def checkpoint(iteration: int, summary: str) -> bool:
 def collect(args: argparse.Namespace, sourcery, ledger: Ledger, iteration: int) -> tuple[list[Finding], bool, bool]:
     """Returns (active findings, sourcery_pending, sourcery_delivered)."""
     log("running gates")
-    found = gate_compile(args.fqbn) + gate_cppcheck() + gate_custom(args.gate)
+    found = gate_compile(args.fqbn) + gate_cppcheck()
+    if not any(f.severity == "error" for f in found):
+        found += gate_custom(args.gate)  # e.g. hardware-in-the-loop: pointless if it doesn't build
     if not args.strict_warnings:
         found = [f for f in found if not (f.source.startswith("compile") and f.severity == "warning"
                                           and f.rule in ("-Wunused-parameter",))]
@@ -653,10 +702,16 @@ def collect(args: argparse.Namespace, sourcery, ledger: Ledger, iteration: int) 
         if s is None:
             pending = True
         else:
+            # Comments on the harness/tooling go to the human, not the author.
+            out_of_scope = [f for f in s if f.path and not f.path.startswith(REVIEW_SCOPE)]
+            for f in out_of_scope:
+                log(f"  Sourcery comment outside review scope, not sent to Claude: {f.path}:{f.line} "
+                    f"{f.message.splitlines()[0][:100] if f.message else ''}")
+            s = [f for f in s if f not in out_of_scope]
             delivered = bool(s)
             found += s
-    disputed = ledger.disputed()
-    return [f for f in dedupe(found) if f.fingerprint not in disputed], pending, delivered
+    suppressed = ledger.suppressed()
+    return [f for f in dedupe(found) if f.fingerprint not in suppressed], pending, delivered
 
 
 def main() -> int:
@@ -680,8 +735,18 @@ def main() -> int:
     ap.add_argument("--resume-last", action="store_true", help="resume the Claude session from the last run")
     ap.add_argument("--allow-dirty", action="store_true")
     ap.add_argument("--stay-on-branch", action="store_true", help="don't create an autodev/* branch")
+    ap.add_argument("--adjudicate", action="append", default=[], metavar="ID=upheld|rejected",
+                    help="rule on a disputed finding in .autodev/ledger.json, then exit")
     args = ap.parse_args()
     args.fqbn = args.fqbn or DEFAULT_FQBNS
+
+    if args.adjudicate:
+        ledger = Ledger()
+        for item in args.adjudicate:
+            fp, _, verdict = item.partition("=")
+            ledger.adjudicate(fp.strip("[] "), verdict.strip())
+            log(f"{fp}: {verdict}")
+        return 0
 
     if args.sourcery == "pr" and args.sourcery_pr:
         args.stay_on_branch = True  # an explicit PR is tied to the branch it was opened from
@@ -737,11 +802,15 @@ def main() -> int:
             sourcery.consumed()  # archive the inbox only once Claude has actually seen it
 
         rejected = ledger.record(last.disputed, findings, it)
+        reverted = revert_protected()
+        if reverted:
+            log(f"WARNING: reverted author edits to protected harness files: {reverted}")
         committed = checkpoint(it, last.summary)
         (run_dir / f"iter_{it:02d}.json").write_text(json.dumps({
             "prompt": prompt, "findings": [asdict(f) for f in findings], "status": last.status,
             "summary": last.summary, "disputed": last.disputed, "rejected_disputes": rejected,
             "questions": last.questions, "cost_usd": last.cost_usd, "committed": committed,
+            "reverted_protected": reverted,
         }, indent=2), "utf-8")
         log(f"Claude: {last.status} (${last.cost_usd:.2f}) - {last.summary[:200]}")
         if rejected:
