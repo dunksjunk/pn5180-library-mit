@@ -443,6 +443,15 @@ class SourceryPR:
     def consumed(self) -> None:
         pass
 
+    def final_push(self) -> str | None:
+        """Push the final local state; return a warning if it stays unpushed."""
+        branch = git("rev-parse", "--abbrev-ref", "HEAD")
+        try:
+            git("push", "-u", self.remote, branch)
+            return None
+        except (RuntimeError, OSError, subprocess.TimeoutExpired) as e:
+            return f"final push of {branch} to {self.remote} FAILED - local branch is ahead of the PR: {e}"
+
 
 # --------------------------------------------------------------------------- #
 # Claude (author)
@@ -549,16 +558,47 @@ class Ledger:
 # --------------------------------------------------------------------------- #
 # Setup
 # --------------------------------------------------------------------------- #
+def find_pdftotext() -> str | None:
+    # Git for Windows / MSYS2 ship poppler's pdftotext but don't put it on the
+    # PowerShell/cmd PATH, so check their usual locations too.
+    candidates = [shutil.which("pdftotext"),
+                  r"C:\Program Files\Git\ucrt64\bin\pdftotext.exe",
+                  r"C:\Program Files\Git\mingw64\bin\pdftotext.exe",
+                  r"C:\msys64\ucrt64\bin\pdftotext.exe",
+                  r"C:\msys64\mingw64\bin\pdftotext.exe"]
+    return next((c for c in candidates if c and Path(c).is_file()), None)
+
+
 def extract_spec_text() -> None:
-    if not shutil.which("pdftotext"):
-        log("pdftotext not found; Claude will read the PDFs directly (slower, costlier)")
+    pdfs = list(SPECS.glob("*.pdf"))
+    texts = [t for t in SPEC_TEXT.glob("*.txt") if t.stat().st_size > 0] if SPEC_TEXT.is_dir() else []
+    if not pdfs and not texts:
+        sys.exit(f"No specification found: put the NXP PDFs in {SPECS.relative_to(ROOT)}/ "
+                 "(or their extracted text in .specs/text/) - the author must not work without them.")
+    stale = [p for p in pdfs if not (SPEC_TEXT / f"{p.stem}.txt").exists()
+             or (SPEC_TEXT / f"{p.stem}.txt").stat().st_size == 0
+             or (SPEC_TEXT / f"{p.stem}.txt").stat().st_mtime < p.stat().st_mtime]
+    if not stale:
         return
+    exe = find_pdftotext()
+    if not exe:
+        sys.exit("pdftotext not found and .specs/text/ is missing or stale. Install poppler "
+                 "(or Git for Windows' ucrt64 tools) - the author must not work without the spec text.")
     SPEC_TEXT.mkdir(parents=True, exist_ok=True)
-    for pdf in SPECS.glob("*.pdf"):
+    for pdf in stale:
         txt = SPEC_TEXT / f"{pdf.stem}.txt"
-        if not txt.exists() or txt.stat().st_mtime < pdf.stat().st_mtime:
-            log(f"extracting {pdf.name} -> {txt.relative_to(ROOT)}")
-            run(["pdftotext", "-layout", str(pdf), str(txt)])
+        # Extract to a per-process temp file and atomically replace, so a failed
+        # or concurrent extraction can never leave a partial destination behind.
+        tmp = txt.with_name(f".{txt.name}.{os.getpid()}.tmp")
+        log(f"extracting {pdf.name} -> {txt.relative_to(ROOT)}")
+        try:
+            r = run([exe, "-layout", str(pdf), str(tmp)])
+            if r.returncode != 0 or not tmp.is_file() or tmp.stat().st_size == 0:
+                sys.exit(f"pdftotext failed on {pdf.name} (exit {r.returncode}); "
+                         "refusing to use partial specification text.")
+            os.replace(tmp, txt)
+        finally:
+            tmp.unlink(missing_ok=True)
 
 
 def preflight(args: argparse.Namespace) -> None:
@@ -602,7 +642,14 @@ def collect(args: argparse.Namespace, sourcery, ledger: Ledger, iteration: int) 
     pending = delivered = False
     if sourcery is not None and not any(f.severity == "error" for f in found):
         log(f"asking Sourcery ({sourcery.name})")
-        s = sourcery.findings(iteration)
+        try:
+            s = sourcery.findings(iteration)
+        except (RuntimeError, OSError, subprocess.TimeoutExpired,
+                json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
+            # Network/auth/API trouble shouldn't kill a run that has paid for
+            # Claude turns: log it, treat the review as pending, keep going.
+            log(f"Sourcery unavailable this iteration: {e}")
+            s = None
         if s is None:
             pending = True
         else:
@@ -714,6 +761,10 @@ def main() -> int:
 
     report = [f"# auto_dev run {run_dir.name}", f"Outcome: {outcome}", f"Spent: ${spent:.2f}",
               f"Branch: {git('rev-parse', '--abbrev-ref', 'HEAD')}", f"Claude session: {claude.session_id}"]
+    push_warning = sourcery.final_push() if hasattr(sourcery, "final_push") else None
+    if push_warning:
+        log(push_warning)
+        report += ["", "## WARNING: unpushed work", push_warning]
     if questions:
         report += ["", "## Questions from Claude", *[f"- {q}" for q in questions]]
     parked = ledger.disputed()
@@ -723,7 +774,7 @@ def main() -> int:
                    for fp in sorted(parked)]
     (run_dir / "report.md").write_text("\n".join(report) + "\n", "utf-8")
     print("\n" + "\n".join(report))
-    return 0 if outcome.startswith("success") else 1
+    return 0 if outcome.startswith("success") and not push_warning else 1
 
 
 if __name__ == "__main__":
