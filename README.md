@@ -59,9 +59,22 @@ The PN5180 uses **3.3 V logic**. Do not connect it to 5 V GPIO without level
 shifting. Many generic breakout modules have separate 3.3 V and 5 V supply pins,
 so check your module's markings.
 
-The first test bed is a generic ESP32 dev board with a generic PN5180 breakout
-wired over SPI. Its exact pin map will be documented with the first example
-sketch.
+### Reference test bed
+
+A generic ESP32 dev board (ESP32-D0WD-V3, 4 MB flash; Arduino board
+"ESP32 Dev Module", `esp32:esp32:esp32`) and a generic PN5180 breakout:
+
+| PN5180 | ESP32 GPIO | Notes |
+|---|---|---|
+| SCK | 18 | VSPI default |
+| MISO | 19 | VSPI default |
+| MOSI | 23 | VSPI default |
+| NSS | 16 | driven manually by the driver |
+| BUSY | 5 | input; GPIO5 is a strapping pin, harmless here |
+| RST | 17 | output |
+| IRQ | (not connected) | the driver polls `IRQ_STATUS` instead |
+
+The examples default to this pin map. Every pin can be changed.
 
 ## Installation
 

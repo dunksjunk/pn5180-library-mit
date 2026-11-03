@@ -96,7 +96,12 @@ CLEAN-ROOM RULES (non-negotiable):
 
 TARGETS:
 - Primary: ESP32 family on Arduino-ESP32 (classic, S3, C3 - all compiled by
-  the harness). Test bed: generic ESP32 dev board + generic PN5180 module, SPI.
+  the harness). Test bed: ESP32-D0WD-V3 dev board (WROOM, 4 MB, esp32:esp32:esp32)
+  + generic PN5180 module. Pins: SCK 18, MISO 19, MOSI 23, NSS 16, BUSY 5,
+  RST 17, IRQ not connected (IRQ must be optional; poll IRQ_STATUS instead).
+  NSS is a plain GPIO driven by the driver - Arduino's default SS is GPIO5,
+  which is BUSY here, so never let SPI.begin() claim SS. Examples default to
+  this pin map but every pin is configurable.
 - Next: Raspberry Pi on Linux (first board: Pi Zero 2 W) via /dev/spidev and
   the GPIO character device (libgpiod). Not compiled by the harness yet, but
   design for it now.
