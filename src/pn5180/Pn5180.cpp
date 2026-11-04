@@ -327,6 +327,138 @@ Status Pn5180::rfOff() {
     return finish(transport_.command(frame, sizeof(frame)));
 }
 
+Status Pn5180::rfOnAndWait(uint8_t flags, uint32_t timeoutMs) {
+    Status s = clearIrq(spec::irq::RF_ACTIVE_ERROR | spec::irq::TX_RFON);  // DS Table 78
+    if (ok(s)) {
+        s = rfOn(flags);  // DS Table 37
+    }
+    if (!ok(s)) {
+        return s;
+    }
+    const uint32_t start = hal_.millis();
+    for (;;) {
+        uint32_t irq = 0;
+        s = readIrqStatus(irq);
+        if (!ok(s)) {
+            return s;
+        }
+        // External field seen during collision avoidance: field stays off.  DS 11.8.2
+        if ((irq & spec::irq::RF_ACTIVE_ERROR) != 0) {
+            (void)clearIrq(spec::irq::RF_ACTIVE_ERROR);  // report RfActiveError regardless
+            return Status::RfActiveError;
+        }
+        uint32_t rf = 0;
+        s = readRegister(spec::reg::RF_STATUS, rf);
+        if (!ok(s)) {
+            return s;
+        }
+        if ((rf & spec::rfstatus::TX_RF_STATUS) != 0) {  // DS Table 103 bit 17
+            return Status::Ok;
+        }
+        if (static_cast<uint32_t>(hal_.millis() - start) > timeoutMs) {
+            return Status::RfFieldTimeout;
+        }
+        hal_.yield();
+    }
+}
+
+Status Pn5180::setCrc(bool txEnabled, bool rxEnabled) {
+    Status s = txEnabled ? writeRegisterOrMask(spec::reg::CRC_TX_CONFIG, spec::kCrcTxEnable)
+                         : writeRegisterAndMask(spec::reg::CRC_TX_CONFIG, ~spec::kCrcTxEnable);
+    if (!ok(s)) {
+        return s;
+    }
+    s = rxEnabled ? writeRegisterOrMask(spec::reg::CRC_RX_CONFIG, spec::kCrcRxEnable)
+                  : writeRegisterAndMask(spec::reg::CRC_RX_CONFIG, ~spec::kCrcRxEnable);
+    return s;
+}
+
+Status Pn5180::idle() {
+    // AND mask clears COMMAND (bits 2:0) to IDLE.  DS Table 75; AN12650 4.1.3 line 6
+    return writeRegisterAndMask(spec::reg::SYSTEM_CONFIG, ~spec::kSystemConfigCommandMask);
+}
+
+Status Pn5180::transceive(const uint8_t* tx, size_t txLen, uint8_t txLastBits, uint8_t* rx,
+                          size_t rxCap, size_t& rxLen, uint8_t& rxLastBits, uint32_t timeoutMs) {
+    rxLen = 0;
+    rxLastBits = 0;
+    lastRxStatus_ = 0;  // stays 0 unless a frame is received
+    if (rx == nullptr && rxCap != 0) {
+        return Status::InvalidArgument;
+    }
+    // Sequence of AN12650 4.1.1 lines 5-9; SEND_DATA requires the transceiver
+    // in WaitTransmit with the Transceive command set (DS Table 15 condition).
+    Status s = clearIrq(spec::irq::ALL);  // AN12650 4.1.3 line 5
+    if (ok(s)) {
+        s = idle();  // AN12650 4.1.3 line 6
+    }
+    if (ok(s)) {
+        // AN12650 4.1.3 line 7; COMMAND was just cleared, so OR yields 011b.  DS Table 75
+        s = writeRegisterOrMask(spec::reg::SYSTEM_CONFIG, spec::kCommandTransceive);
+    }
+    if (ok(s)) {
+        s = sendData(tx, txLen, txLastBits);  // DS Table 15
+    }
+    if (!ok(s)) {
+        return s;
+    }
+
+    // Wait for end of reception: RX_IRQ.  DS Table 77 bit 0; AN12650 4.1.2 line 9
+    const uint32_t start = hal_.millis();
+    for (;;) {
+        uint32_t irq = 0;
+        s = readIrqStatus(irq);
+        if (!ok(s)) {
+            return s;
+        }
+        if ((irq & spec::irq::GENERAL_ERROR) != 0) {  // DS Table 77 bit 17
+            (void)clearIrq(spec::irq::GENERAL_ERROR);  // report ChipError regardless
+            return Status::ChipError;
+        }
+        if ((irq & spec::irq::RX) != 0) {
+            break;
+        }
+        // Strictly greater: millis() granularity must not shorten the wait.
+        if (static_cast<uint32_t>(hal_.millis() - start) > timeoutMs) {
+            // Stop the receiver so the next exchange starts clean.  DS Table 75 (IDLE/StopCom)
+            s = idle();
+            return ok(s) ? Status::NoResponse : s;
+        }
+        hal_.yield();
+    }
+
+    uint32_t st = 0;
+    s = readRegister(spec::reg::RX_STATUS, st);  // DS Table 93
+    if (!ok(s)) {
+        return s;
+    }
+    lastRxStatus_ = st;
+    const size_t n = st & spec::rxstatus::NUM_BYTES_MASK;
+    rxLastBits = static_cast<uint8_t>((st >> spec::rxstatus::NUM_LAST_BITS_SHIFT) &
+                                      spec::rxstatus::NUM_LAST_BITS_MASK);
+    if (n > rxCap) {
+        return Status::BufferTooSmall;
+    }
+    if (n > 0) {
+        s = readData(rx, n);  // DS Table 17
+        if (!ok(s)) {
+            return s;
+        }
+    }
+    rxLen = n;
+    // A collision usually also breaks parity, so it is reported first.  DS Table 93
+    if ((st & spec::rxstatus::COLLISION_DETECTED) != 0) {
+        return Status::Collision;
+    }
+    if ((st & spec::rxstatus::PROTOCOL_ERROR) != 0) {
+        return Status::ProtocolError;
+    }
+    if ((st & spec::rxstatus::DATA_INTEGRITY_ERROR) != 0) {
+        return Status::IntegrityError;
+    }
+    return Status::Ok;
+}
+
 Status Pn5180::readVersions(Versions& out) {
     // Product, firmware and EEPROM versions are contiguous (0x10..0x15).  DS Table 51
     uint8_t raw[3 * spec::eeprom::kVersionBytes] = {};

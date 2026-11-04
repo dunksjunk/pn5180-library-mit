@@ -6,6 +6,7 @@
 #pragma once
 
 #include "pn5180/Hal.h"
+#include "pn5180/Iso14443a.h"
 #include "pn5180/Pn5180.h"
 #include "pn5180/Spec.h"
 #include "pn5180/Status.h"

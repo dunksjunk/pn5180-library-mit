@@ -145,6 +145,52 @@ constexpr uint8_t kFelicaEmdMinFwMinor = 1;
 
 // SYSTEM_CONFIG bits
 constexpr uint32_t kSystemConfigSoftReset = 1u << 8;  // SOFT_RESET              DS 11.2.1.2, Table 75
+// SYSTEM_CONFIG.COMMAND (bits 2:0): transceive state machine command.       DS Table 75
+constexpr uint32_t kSystemConfigCommandMask = 0x7u;   // bits 2:0              DS Table 75
+constexpr uint32_t kCommandIdle = 0x0u;               // IDLE/StopCom          DS Table 75; AN12650 4.1.3 line 6
+constexpr uint32_t kCommandTransceive = 0x3u;         // Transceive            DS Table 75, Table 15; AN12650 4.1.3 line 7
+
+// CRC_TX_CONFIG bit 0 TX_CRC_ENABLE: Tx-Encoder computes and appends CRC.   DS Table 99; AN12650 4.1.3 line 3
+constexpr uint32_t kCrcTxEnable = 1u << 0;
+// CRC_RX_CONFIG bit 0 RX_CRC_ENABLE: Rx-Decoder checks the CRC.             DS Table 92; AN12650 4.1.3 line 4
+constexpr uint32_t kCrcRxEnable = 1u << 0;
+
+// RX_STATUS fields (DS Table 93)
+namespace rxstatus {
+constexpr uint32_t NUM_BYTES_MASK = 0x1FFu;           // bits 8:0 RX_NUM_BYTES_RECEIVED
+constexpr unsigned NUM_LAST_BITS_SHIFT = 13;          // bits 15:13 RX_NUM_LAST_BITS
+constexpr uint32_t NUM_LAST_BITS_MASK = 0x7u;
+constexpr uint32_t DATA_INTEGRITY_ERROR = 1u << 16;   // wrong parity or CRC
+constexpr uint32_t PROTOCOL_ERROR = 1u << 17;         // stop bit / SOF / EOF / length
+constexpr uint32_t COLLISION_DETECTED = 1u << 18;     // collision in received frame
+constexpr unsigned COLL_POS_SHIFT = 19;               // bits 25:19 RX_COLL_POS
+constexpr uint32_t COLL_POS_MASK = 0x7Fu;
+}  // namespace rxstatus
+
+// RF_STATUS fields (DS Table 103)
+namespace rfstatus {
+constexpr uint32_t TX_ACTIVE = 1u << 11;              // TxEncoder transmitting
+constexpr uint32_t RX_ENABLE = 1u << 12;              // RxDecoder enabled by the Transceive unit
+constexpr unsigned ACTIVE_ERROR_CAUSE_SHIFT = 13;     // bits 15:13 RF_ACTIVE_ERROR_CAUSE
+constexpr uint32_t ACTIVE_ERROR_CAUSE_MASK = 0x7u;
+constexpr uint32_t RF_DET_STATUS = 1u << 16;          // external RF field detected
+constexpr uint32_t TX_RF_STATUS = 1u << 17;           // own RF field (drivers) on
+constexpr unsigned TRANSCEIVE_STATE_SHIFT = 24;       // bits 26:24 TRANSCEIVE_STATE
+constexpr uint32_t TRANSCEIVE_STATE_MASK = 0x7u;      // 0 IDLE, 1 WaitTransmit, ... 5 Receiving
+}  // namespace rfstatus
+
+// LOAD_RF_CONFIG indexes for ISO/IEC 14443-A 106 kbit/s.     DS Table 32; AN12650 4.1.3 line 1
+constexpr uint8_t kRfConfigIso14443a106Tx = 0x00;
+constexpr uint8_t kRfConfigIso14443a106Rx = 0x80;
+
+// RF_CONTROL_RX bits 1:0 RX_GAIN: 0 = 33 dB, 1 = 40 dB, 2 = 50 dB, 3 = 57 dB.  DS Table 108
+constexpr uint32_t kRfControlRxGainMask = 0x3u;
+// RX_GAIN of the documented ISO 14443-A 106 receiver default RF_CONTROL_RX
+// = 0x1E (bits 1:0 = 10b).                                   DS Table 172, Table 108
+constexpr uint32_t kRxGainIso14443a106 = 0x2u;
+// Documented ISO 14443-A 106 receiver default SIGPRO_RM_CONFIG (MIN_LEVEL,
+// bits 15:12, = 3).                                          DS Table 172, Table 102
+constexpr uint32_t kSigproRmConfigIso14443a106 = 0x430DCu;
 
 // --------------------------------------------------------------------------
 // IRQ_STATUS bits (DS Table 77). IRQ_CLEAR (DS Table 78) and IRQ_ENABLE

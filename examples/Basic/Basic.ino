@@ -48,6 +48,28 @@ void printVersion(const char* label, const pn5180::Version& v) {
     Serial.println(v.minor, HEX);
 }
 
+void printHex2(uint8_t b) {
+    if (b < 0x10) {
+        Serial.print('0');
+    }
+    Serial.print(b, HEX);
+}
+
+// The data sheet gives no major.minor meaning for the EEPROM version
+// (DS Table 51), so print the raw 16-bit little-endian value and its bytes
+// in address order (0x14, 0x15).
+void printRawVersion(const char* label, const pn5180::Version& v) {
+    Serial.print(label);
+    Serial.print("0x");
+    printHex2(v.major);  // byte at the higher address  DS Table 51
+    printHex2(v.minor);  // byte at the lower address   DS Table 51
+    Serial.print(" (bytes ");
+    printHex2(v.minor);
+    Serial.print(' ');
+    printHex2(v.major);
+    Serial.println(')');
+}
+
 }  // namespace
 
 void setup() {
@@ -69,7 +91,7 @@ void setup() {
     if (check("read versions", nfc.readVersions(v))) {
         printVersion("  product version:  ", v.product);
         printVersion("  firmware version: ", v.firmware);
-        printVersion("  EEPROM version:   ", v.eeprom);
+        printRawVersion("  EEPROM version:   ", v.eeprom);
     }
 
     uint32_t irq = 0;

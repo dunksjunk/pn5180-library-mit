@@ -2,14 +2,19 @@
 // Copyright (c) 2026 Rich Dunkel
 //
 // PC unit test of the portable core against a fake HAL (no hardware).
-// Build: g++ -std=c++17 -Wall -Wextra -Werror -Isrc tests/host/test_core.cpp
+// Build: g++ -std=c++17 -Wall -Wextra -Werror -Isrc -Itests/host tests/host/test_core.cpp
 //        src/pn5180/Transport.cpp src/pn5180/Pn5180.cpp src/pn5180/Status.cpp
+//        src/pn5180/Iso14443a.cpp
 #include <cstdio>
 #include <cstring>
 
+#include "FakeHal.h"
+#include "pn5180/Iso14443a.h"
 #include "pn5180/Pn5180.h"
 
 using namespace pn5180;
+using fake::FakeCardA;
+using fake::FakeHal;
 
 namespace {
 
@@ -23,102 +28,7 @@ int failures = 0;
         }                                                                \
     } while (0)
 
-// Minimal PN5180 model: register file, EEPROM, BUSY pulse per frame.
-class FakeHal : public Hal {
-public:
-    uint32_t regs[0x44] = {};
-    uint8_t eeprom[256] = {};
-    uint8_t lastCmd[300] = {};
-    size_t lastCmdLen = 0;
-    bool stuckBusy = false;
-    bool raiseErrorOn = false;  // set GENERAL_ERROR on the next write command
-    int frames = 0;
-    int locks = 0;
-    bool inFrame = false;
-
-    Status begin() override { return Status::Ok; }
-    Status beginFrame() override {
-        inFrame = true;
-        return Status::Ok;
-    }
-    Status transfer(const uint8_t* tx, uint8_t* rx, size_t len, uint8_t filler) override {
-        if (tx != nullptr) {  // instruction frame
-            std::memcpy(lastCmd, tx, len);
-            lastCmdLen = len;
-            execute();
-        } else {  // response frame
-            if (filler != 0xFF) return Status::HalError;
-            for (size_t i = 0; i < len; ++i) rx[i] = i < rspLen ? rsp[i] : 0;
-        }
-        busyLevel = true;  // BUSY rises after the frame (DS 11.4.1)
-        return Status::Ok;
-    }
-    void endFrame() override {
-        inFrame = false;
-        ++frames;
-    }
-    void setReset(bool asserted) override {
-        if (!asserted) regs[spec::reg::IRQ_STATUS] = spec::irq::IDLE;  // boot done
-    }
-    bool busy() override {
-        if (stuckBusy) return true;
-        // BUSY drops once the host has seen it high and released NSS.
-        if (busyLevel && !inFrame) {
-            busyLevel = false;
-            return true;
-        }
-        return busyLevel;
-    }
-    uint32_t millis() override { return now++; }
-    void delayMs(uint32_t ms) override { now += ms; }
-    void delayUs(uint32_t) override {}
-    void lock() override { ++locks; }
-    void unlock() override { --locks; }
-
-private:
-    bool busyLevel = false;
-    uint32_t now = 0;
-    uint8_t rsp[512] = {};
-    size_t rspLen = 0;
-
-    void execute() {
-        const uint8_t c = lastCmd[0];
-        uint32_t v = 0;
-        if (lastCmdLen >= 6) {
-            v = lastCmd[2] | (lastCmd[3] << 8) | (lastCmd[4] << 16) | (uint32_t(lastCmd[5]) << 24);
-        }
-        if (raiseErrorOn && c != spec::cmd::READ_REGISTER) {
-            raiseErrorOn = false;
-            regs[spec::reg::IRQ_STATUS] |= spec::irq::GENERAL_ERROR;
-            return;
-        }
-        switch (c) {
-            case spec::cmd::WRITE_REGISTER:
-                if (lastCmd[1] == spec::reg::IRQ_CLEAR) regs[spec::reg::IRQ_STATUS] &= ~v;
-                else regs[lastCmd[1]] = v;
-                break;
-            case spec::cmd::WRITE_REGISTER_OR_MASK: regs[lastCmd[1]] |= v; break;
-            case spec::cmd::WRITE_REGISTER_AND_MASK: regs[lastCmd[1]] &= v; break;
-            case spec::cmd::READ_REGISTER:
-                v = regs[lastCmd[1]];
-                for (int i = 0; i < 4; ++i) rsp[i] = uint8_t(v >> (8 * i));
-                rspLen = 4;
-                break;
-            case spec::cmd::READ_EEPROM:
-                std::memcpy(rsp, &eeprom[lastCmd[1]], lastCmd[2]);
-                rspLen = lastCmd[2];
-                break;
-            case spec::cmd::WRITE_EEPROM:
-                std::memcpy(&eeprom[lastCmd[1]], &lastCmd[2], lastCmdLen - 2);
-                break;
-            default: break;
-        }
-    }
-};
-
-}  // namespace
-
-int main() {
+void testCore() {
     FakeHal hal;
     // FW 4.1, product 3.A, EEPROM 0.93 (byte order per DS Table 51)
     const uint8_t versions[6] = {0x0A, 0x03, 0x01, 0x04, 0x93, 0x00};
@@ -176,7 +86,125 @@ int main() {
     hal.stuckBusy = false;
     EXPECT(hal.locks == 0);
     EXPECT(!hal.inFrame);
+}
 
+// Activates `card` and checks UID / ATQA / SAK.
+void expectActivation(FakeCardA& card, uint8_t expectedSak) {
+    FakeHal hal;
+    hal.card = &card;
+    Pn5180 nfc(hal);
+    Iso14443a reader(nfc);
+    EXPECT(nfc.begin() == Status::Ok);
+    // Values the reference module loads (ARC override, DS 11.8.6).
+    hal.regs[spec::reg::RF_CONTROL_RX] = 0x1Fu;
+    hal.regs[spec::reg::SIGPRO_RM_CONFIG] = 0x440DCu;
+    EXPECT(reader.fieldOn() == Status::Ok);
+    // fieldOn() sets RX_GAIN 2, keeps the other bits, and restores the
+    // DS Table 172 SIGPRO_RM_CONFIG default.
+    EXPECT(hal.regs[spec::reg::RF_CONTROL_RX] == 0x1Eu);
+    EXPECT(hal.regs[spec::reg::SIGPRO_RM_CONFIG] == 0x430DCu);
+    CardA out;
+    EXPECT(reader.activate(out) == Status::Ok);
+    EXPECT(out.uidLen == card.uidLen);
+    EXPECT(std::memcmp(out.uid, card.uid, card.uidLen) == 0);
+    EXPECT(out.atqa == static_cast<uint16_t>(card.atqa[0] | (card.atqa[1] << 8)));
+    EXPECT(out.sak == expectedSak);
+    EXPECT(card.selectSawCrc);
+    // HLTA: card stays silent -> Ok; REQA then gets no answer, WUPA does.
+    EXPECT(reader.halt() == Status::Ok);
+    EXPECT(card.halted);
+    EXPECT(reader.activate(out) == Status::NoResponse);
+    EXPECT(reader.activate(out, true) == Status::Ok);
+    EXPECT(reader.fieldOff() == Status::Ok);
+    EXPECT(hal.locks == 0);
+}
+
+void testIso14443a() {
+    // 4-, 7- and 10-byte UIDs (cascade levels 1..3).  ISO/IEC 14443-3 6.5.4
+    FakeCardA single;
+    const uint8_t u4[4] = {0xDE, 0xAD, 0xBE, 0xEF};
+    std::memcpy(single.uid, u4, 4);
+    single.uidLen = 4;
+    single.atqa[0] = 0x04;
+    single.sak = 0x08;
+    expectActivation(single, 0x08);
+
+    FakeCardA dbl;
+    const uint8_t u7[7] = {0x04, 0xA1, 0xB2, 0xC3, 0xD4, 0xE5, 0xF6};
+    std::memcpy(dbl.uid, u7, 7);
+    dbl.uidLen = 7;
+    dbl.sak = 0x00;
+    expectActivation(dbl, 0x00);
+    EXPECT(dbl.levelsSelected == 2);
+
+    FakeCardA triple;
+    const uint8_t u10[10] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
+    std::memcpy(triple.uid, u10, 10);
+    triple.uidLen = 10;
+    triple.sak = 0x20;
+    expectActivation(triple, 0x20);
+    EXPECT(triple.levelsSelected == 3);
+
+    // No card -> NoResponse, never hangs.
+    {
+        FakeHal hal;
+        Pn5180 nfc(hal);
+        Iso14443a reader(nfc);
+        EXPECT(nfc.begin() == Status::Ok);
+        CardA out;
+        EXPECT(reader.activate(out) == Status::NoResponse);
+        EXPECT((hal.regs[spec::reg::SYSTEM_CONFIG] & spec::kSystemConfigCommandMask) ==
+               spec::kCommandIdle);
+    }
+    // Collision in the anticollision answer -> Collision (not resolved).
+    {
+        FakeCardA c;
+        c.collide = true;
+        FakeHal hal;
+        hal.card = &c;
+        Pn5180 nfc(hal);
+        Iso14443a reader(nfc);
+        EXPECT(nfc.begin() == Status::Ok);
+        CardA out;
+        EXPECT(reader.activate(out) == Status::Collision);
+    }
+    // Wrong BCC -> IntegrityError.
+    {
+        FakeCardA c;
+        c.corruptBcc = true;
+        FakeHal hal;
+        hal.card = &c;
+        Pn5180 nfc(hal);
+        Iso14443a reader(nfc);
+        EXPECT(nfc.begin() == Status::Ok);
+        CardA out;
+        EXPECT(reader.activate(out) == Status::IntegrityError);
+    }
+}
+
+void testRecoveryPolicy() {
+    EXPECT(requiresRecovery(Status::BusyTimeout));
+    EXPECT(requiresRecovery(Status::IrqTimeout));
+    EXPECT(requiresRecovery(Status::HalError));
+    EXPECT(requiresRecovery(Status::ChipError));
+    EXPECT(requiresRecovery(Status::NotInitialized));
+    EXPECT(requiresRecovery(Status::RfFieldTimeout));
+    EXPECT(!requiresRecovery(Status::Ok));
+    EXPECT(!requiresRecovery(Status::NoResponse));
+    EXPECT(!requiresRecovery(Status::Collision));
+    EXPECT(!requiresRecovery(Status::IntegrityError));
+    EXPECT(!requiresRecovery(Status::ProtocolError));
+    EXPECT(!requiresRecovery(Status::CardError));
+    EXPECT(!requiresRecovery(Status::RfActiveError));
+    EXPECT(!requiresRecovery(Status::InvalidArgument));
+}
+
+}  // namespace
+
+int main() {
+    testRecoveryPolicy();
+    testCore();
+    testIso14443a();
     if (failures == 0) {
         std::printf("all tests passed\n");
         return 0;
