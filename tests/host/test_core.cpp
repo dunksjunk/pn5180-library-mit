@@ -104,10 +104,10 @@ void expectActivation(FakeCardA& card, uint8_t expectedSak) {
     hal.regs[spec::reg::RF_CONTROL_RX] = 0x1Fu;
     hal.regs[spec::reg::SIGPRO_RM_CONFIG] = 0x440DCu;
     EXPECT(reader.fieldOn() == Status::Ok);
-    // fieldOn() sets RX_GAIN 2, keeps the other bits, and restores the
-    // DS Table 172 SIGPRO_RM_CONFIG default.
+    // fieldOn() sets RX_GAIN 2, keeps the other bits, and writes the DS
+    // Table 172 SIGPRO_RM_CONFIG default with MIN_LEVEL 5 (measured, Spec.h).
     EXPECT(hal.regs[spec::reg::RF_CONTROL_RX] == 0x1Eu);
-    EXPECT(hal.regs[spec::reg::SIGPRO_RM_CONFIG] == 0x430DCu);
+    EXPECT(hal.regs[spec::reg::SIGPRO_RM_CONFIG] == 0x450DCu);
     CardA out;
     EXPECT(reader.activate(out) == Status::Ok);
     EXPECT(out.uidLen == card.uidLen);
@@ -122,6 +122,115 @@ void expectActivation(FakeCardA& card, uint8_t expectedSak) {
     EXPECT(reader.activate(out, true) == Status::Ok);
     EXPECT(reader.fieldOff() == Status::Ok);
     EXPECT(hal.locks == 0);
+}
+
+// Iso14443a::activateWithRetry with injected transient / persistent faults.
+struct RigA {
+    FakeCardA card;
+    FakeHal hal;
+    Pn5180 nfc{hal};
+    Iso14443a reader{nfc};
+    RigA() {
+        const uint8_t u7[7] = {0x04, 0xBB, 0x6A, 0x04, 0xCC, 0x2A, 0x81};
+        std::memcpy(card.uid, u7, 7);
+        card.uidLen = 7;
+        hal.card = &card;
+        EXPECT(nfc.begin() == Status::Ok);
+        EXPECT(reader.fieldOn() == Status::Ok);
+    }
+};
+
+void testActivateRetry() {
+    {  // garbled ATQA once -> second attempt succeeds with a fresh REQA
+        RigA r;
+        r.hal.garbleA = 1;
+        CardA out;
+        EXPECT(r.reader.activateWithRetry(out) == Status::Ok);
+        EXPECT(out.uidLen == 7 && out.uid[1] == 0xBB);
+        EXPECT(r.hal.requestsA == 2);
+        EXPECT(r.hal.rfOffs == 0);  // no field reset by default
+    }
+    {  // garbled CL1 anticollision answer (2nd frame) once: restart with REQA
+        RigA r;
+        r.hal.faultSkipA = 1;
+        r.hal.garbleA = 1;
+        CardA out;
+        EXPECT(r.reader.activateWithRetry(out) == Status::Ok);
+        EXPECT(r.hal.requestsA == 2);
+        EXPECT(out.uidLen == 7);
+    }
+    {  // SELECT CL2 (5th frame) unanswered once
+        RigA r;
+        r.hal.faultSkipA = 4;
+        r.hal.muteA = 1;
+        CardA out;
+        EXPECT(r.reader.activateWithRetry(out) == Status::Ok);
+        EXPECT(r.hal.requestsA == 2);
+        EXPECT(r.hal.framesA == 10);  // 5 failed-attempt frames + 5 good ones
+    }
+    {  // no answer once -> retried
+        RigA r;
+        r.hal.muteA = 1;
+        CardA out;
+        EXPECT(r.reader.activateWithRetry(out) == Status::Ok);
+        EXPECT(r.hal.requestsA == 2);
+    }
+    {  // persistent garbage -> bounded: exactly `attempts` activations, last status
+        RigA r;
+        r.hal.garbleA = 1000;
+        CardA out;
+        ActivateRetry p;
+        p.attempts = 4;
+        EXPECT(r.reader.activateWithRetry(out, false, p) == Status::Collision);
+        EXPECT(r.hal.requestsA == 4);
+    }
+    {  // persistent silence -> NoResponse after the default 3 attempts
+        RigA r;
+        r.hal.muteA = 1000;
+        CardA out;
+        EXPECT(r.reader.activateWithRetry(out) == Status::NoResponse);
+        EXPECT(r.hal.requestsA == 3);
+    }
+    {  // attempts clamped to 1..kMaxAttempts
+        RigA r;
+        r.hal.muteA = 1000;
+        CardA out;
+        ActivateRetry p;
+        p.attempts = 0;
+        EXPECT(r.reader.activateWithRetry(out, false, p) == Status::NoResponse);
+        EXPECT(r.hal.requestsA == 1);
+        p.attempts = 200;
+        r.hal.requestsA = 0;
+        EXPECT(r.reader.activateWithRetry(out, false, p) == Status::NoResponse);
+        EXPECT(r.hal.requestsA == ActivateRetry::kMaxAttempts);
+    }
+    {  // resetField: one RF_OFF + RF_ON per retry, field left on
+        RigA r;
+        r.hal.garbleA = 2;
+        CardA out;
+        ActivateRetry p;
+        p.resetField = true;
+        EXPECT(r.reader.activateWithRetry(out, false, p) == Status::Ok);
+        EXPECT(r.hal.rfOffs == 2);
+        EXPECT((r.hal.regs[spec::reg::RF_STATUS] & spec::rfstatus::TX_RF_STATUS) != 0);
+    }
+    {  // REQA retry does not wake a HALTed card; resetField does (POWER-OFF -> IDLE)
+        RigA r;
+        CardA out;
+        EXPECT(r.reader.activate(out) == Status::Ok);
+        EXPECT(r.reader.halt() == Status::Ok);
+        EXPECT(r.reader.activateWithRetry(out) == Status::NoResponse);
+        ActivateRetry p;
+        p.resetField = true;
+        EXPECT(r.reader.activateWithRetry(out, false, p) == Status::Ok);
+    }
+    {  // device error is not retried
+        RigA r;
+        r.hal.errorAtSendData = 1;
+        CardA out;
+        EXPECT(r.reader.activateWithRetry(out) == Status::ChipError);
+        EXPECT(r.hal.requestsA == 0);
+    }
 }
 
 void testIso14443a() {
@@ -187,6 +296,7 @@ void testIso14443a() {
         CardA out;
         EXPECT(reader.activate(out) == Status::IntegrityError);
     }
+    testActivateRetry();
 }
 
 // Card from the M2 bring-up: single-slot INVENTORY answered
@@ -408,6 +518,21 @@ void testType2Tag() {
         EXPECT(n == 18 && bits == 0);
         EXPECT(r.hal.locks == 0);
     }
+    // WRITE waits for a slow ACK: the timeout handed to transceive covers the
+    // measured worst case (12.8 ms) and is what kWriteTimeoutMs says.
+    {
+        RigT2T r;
+        const uint8_t d[4] = {0x01, 0x02, 0x03, 0x04};
+        r.tag.writeAckDelayMs = 13;
+        EXPECT(r.t2.write(10, d) == Status::Ok);
+        EXPECT(r.crcRxOn());
+        r.tag.writeAckDelayMs = t2t::kWriteTimeoutMs - 2;
+        EXPECT(r.t2.write(10, d) == Status::Ok);
+        // Clearly beyond: the host timer starts after SEND_DATA (a few ticks late).
+        r.tag.writeAckDelayMs = 2 * t2t::kWriteTimeoutMs;
+        EXPECT(r.t2.write(10, d) == Status::NoResponse);
+        EXPECT(r.crcRxOn());
+    }
     // NAK -> CardError, CRC RX restored.
     {
         RigT2T r;
@@ -510,6 +635,8 @@ void testIso15693Memory() {
         EXPECT(r.reader.writeBlock(uid, 27, d, 0) == Status::InvalidArgument);
         // Timeouts: write includes the 20 ms programming window.
         static_assert(iso15693::kWriteBlockTimeoutMs > 20, "write window missing");
+        // T2T WRITE ACK measured at < 12.8 ms on the test bed (Type2Tag.h).
+        static_assert(t2t::kWriteTimeoutMs >= 13 + 1, "T2T write timeout below measurement");
         static_assert(iso15693::kReadBlockTimeoutMs < 20, "read timeout too long");
     }
     // Locked block: security status reports it; write -> error 12h.

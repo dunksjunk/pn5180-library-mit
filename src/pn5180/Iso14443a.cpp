@@ -10,7 +10,18 @@ namespace pn5180 {
 
 using namespace iso14443a;
 
+namespace {
+
+// Errors after which a new activation can succeed: no answer or a garbled one.
+bool retryable(Status s) {
+    return s == Status::NoResponse || s == Status::Collision || s == Status::IntegrityError ||
+           s == Status::ProtocolError || s == Status::CardError || s == Status::BufferTooSmall;
+}
+
+}  // namespace
+
 Status Iso14443a::fieldOn(uint32_t guardMs) {
+    guardMs_ = guardMs;
     // ISO 14443-A 106 kbit/s Tx 0x00 / Rx 0x80.  DS Table 32; AN12650 4.1.3 line 1
     Status s = nfc_.loadRfConfig(spec::kRfConfigIso14443a106Tx, spec::kRfConfigIso14443a106Rx);
     if (ok(s)) {
@@ -30,9 +41,11 @@ Status Iso14443a::setupReceiver() {
     // the EEPROM ARC table (DS 11.8.6). On the reference module they come out
     // as RX_GAIN 3 / MIN_LEVEL 4 (RF_CONTROL_RX 0x1F, SIGPRO_RM_CONFIG
     // 0x440DC), which on hardware produced false SOF detections and garbage
-    // frames flagged as collisions instead of a clean ATQA. RX_GAIN 2 with the
-    // documented SIGPRO_RM_CONFIG default (MIN_LEVEL 3) reads cards reliably.
-    // DS Table 108 also warns that RX_GAIN 3 with a low MIN_LEVEL may raise no IRQ.
+    // frames flagged as collisions instead of a clean ATQA. RX_GAIN 2 with
+    // MIN_LEVEL 5 (Spec.h kSigproRmConfigIso14443a106: measured 0/110
+    // failures with three cards on the antenna, vs 7/110 at the DS Table 172
+    // default MIN_LEVEL 3) keeps noise below the subcarrier threshold.
+    // DS Table 102 also warns that RX_GAIN 3 with a low MIN_LEVEL may raise no IRQ.
     // ARC applies its table after RF_ON, so these writes must follow RF_ON:
     // written before, they do not stick.
     Status s = nfc_.writeRegisterAndMask(spec::reg::RF_CONTROL_RX, ~spec::kRfControlRxGainMask);
@@ -154,6 +167,32 @@ Status Iso14443a::activate(CardA& card, bool wakeup) {
     }
     card.atqa = atqa;
     return select(card);
+}
+
+Status Iso14443a::activateWithRetry(CardA& card, bool wakeup, ActivateRetry policy) {
+    uint8_t attempts = policy.attempts;
+    if (attempts < 1) {
+        attempts = 1;
+    } else if (attempts > ActivateRetry::kMaxAttempts) {
+        attempts = ActivateRetry::kMaxAttempts;
+    }
+    Status s = activate(card, wakeup);
+    for (uint8_t i = 1; i < attempts && retryable(s); ++i) {
+        if (policy.resetField) {
+            // POWER-OFF -> IDLE for every PICC.  ISO/IEC 14443-3 6.3
+            Status r = fieldOff();
+            if (ok(r)) {
+                nfc_.delayMs(kFieldResetOffMs);
+                r = fieldOn(guardMs_);
+            }
+            if (!ok(r)) {
+                return r;
+            }
+        }
+        // The PICC is back in IDLE (or HALT): restart with REQA/WUPA.  ISO/IEC 14443-3 6.3
+        s = activate(card, wakeup);
+    }
+    return s;
 }
 
 Status Iso14443a::halt() {

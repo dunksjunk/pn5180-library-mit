@@ -40,6 +40,18 @@ constexpr uint8_t kShortFrameBits = 7;       // REQA/WUPA are 7-bit short frames
 constexpr size_t kMaxCascadeLevels = 3;
 }  // namespace iso14443a
 
+// Bounded retry for activation (Iso14443a::activateWithRetry).
+struct ActivateRetry {
+    // Total activations tried, including the first (clamped to 1..kMaxAttempts).
+    uint8_t attempts = 3;
+    // Before each retry, switch the field off and on again (fieldOff(),
+    // kFieldResetOffMs, fieldOn() with the guard of the last fieldOn()).
+    // This also wakes HALTed cards: a field reset puts every PICC into
+    // POWER-OFF and then IDLE.  ISO/IEC 14443-3 6.3
+    bool resetField = false;
+    static constexpr uint8_t kMaxAttempts = 10;
+};
+
 // Not thread-safe; shares the single-owner rule of Pn5180 (see Pn5180.h).
 class Iso14443a {
 public:
@@ -52,7 +64,8 @@ public:
 
     // LOAD_RF_CONFIG for ISO 14443-A 106 kbit/s (DS Table 32), RF_ON and
     // wait for the field (DS Table 37, Table 103), set the receiver to
-    // RX_GAIN 2 / SIGPRO_RM_CONFIG 0x430DC (DS Tables 102, 108, 172; must be
+    // RX_GAIN 2 / SIGPRO_RM_CONFIG 0x450DC = DS default with MIN_LEVEL 5,
+    // measured, see Spec.h (DS Tables 102, 108, 172; must be
     // after RF_ON because of ARC, DS 11.8.6), then wait `guardMs` with
     // unmodulated field so the card can power up before the first command
     // (ISO/IEC 14443-3 5: >= 5 ms).
@@ -71,6 +84,21 @@ public:
     // request() + select(). NoResponse means no card in the field.
     Status activate(CardA& card, bool wakeup = false);
 
+    // activate() with a bounded retry after a transient error: no answer,
+    // or a garbled ATQA / anticollision / SELECT answer (NoResponse,
+    // Collision, IntegrityError, ProtocolError, CardError, BufferTooSmall).
+    // A PICC that receives an erroneous frame, or misses one, returns from
+    // READY to IDLE (to HALT if it was woken from HALT), so each retry
+    // restarts the whole sequence with the same REQA/WUPA.  ISO/IEC 14443-3 6.3
+    // Any other status (device errors, InvalidArgument) is returned at once.
+    // Returns the status of the last attempt. With no card in the field this
+    // costs `attempts` request timeouts (plus field resets if enabled).
+    Status activateWithRetry(CardA& card, bool wakeup = false, ActivateRetry policy = {});
+
+    // Pause between fieldOff() and fieldOn() for ActivateRetry::resetField:
+    // PCD field reset, field off for at least t_RESET = 5 ms.  ISO/IEC 14443-3 5
+    static constexpr uint32_t kFieldResetOffMs = 5;
+
     // HLTA. A card must not answer (ISO/IEC 14443-3 6.4.3), so no response
     // within the timeout is success; any answer is CardError.
     Status halt();
@@ -83,6 +111,7 @@ private:
 
     Pn5180& nfc_;
     uint32_t timeoutMs_ = 5;
+    uint32_t guardMs_ = 5;  // guard of the last fieldOn(), reused by field resets
 };
 
 }  // namespace pn5180

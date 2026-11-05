@@ -109,6 +109,7 @@ struct FakeT2T {
     int weakWrites = 0;          // n > 0: the next n WRITEs store data ^ 01h (still ACK)
     int writes = 0;              // ACKed writes
     int ignored = 0;             // frames ignored for a bad/missing CRC
+    uint32_t writeAckDelayMs = 0;  // ACK of a WRITE arrives this late (simulated ms)
 
     FakeT2T() {
         // CC: E1h, version 1.0, 496 bytes data area (pages 4..127), RW.
@@ -313,6 +314,14 @@ public:
     bool inFrame = false;
     FakeCardA* card = nullptr;  // card in the field (nullptr = none)
     FakeT2T* t2t = nullptr;     // activated Type 2 Tag (takes precedence over `card`)
+    // Type A fault injection (for `card`): the next n frames get no answer /
+    // a garbled 1-byte answer flagged as a collision.
+    int muteA = 0;
+    int garbleA = 0;
+    int faultSkipA = 0;  // frames answered normally before the faults apply
+    int framesA = 0;    // Type A frames sent to `card`
+    int requestsA = 0;  // of those, REQA/WUPA short frames
+    int rfOffs = 0;     // RF_OFF commands
 
     Status begin() override { return Status::Ok; }
     Status beginFrame() override {
@@ -347,7 +356,10 @@ public:
         }
         return busyLevel;
     }
-    uint32_t millis() override { return now++; }
+    // Simulated time advances only where the core waits (yield / delayMs),
+    // so timeouts measure the waits the driver really makes.
+    uint32_t millis() override { return now; }
+    void yield() override { ++now; }
     void delayMs(uint32_t ms) override { now += ms; }
     void delayUs(uint32_t) override {}
     void lock() override { ++locks; }
@@ -356,6 +368,8 @@ public:
 private:
     bool busyLevel = false;
     uint32_t now = 0;
+    bool rxPending = false;  // an answer that becomes visible (RX_IRQ) at rxReadyAt
+    uint32_t rxReadyAt = 0;
     uint8_t rsp[512] = {};
     size_t rspLen = 0;
     uint8_t rfRx[512] = {};
@@ -379,6 +393,10 @@ private:
             case spec::cmd::WRITE_REGISTER_OR_MASK: regs[lastCmd[1]] |= v; break;
             case spec::cmd::WRITE_REGISTER_AND_MASK: regs[lastCmd[1]] &= v; break;
             case spec::cmd::READ_REGISTER:
+                if (rxPending && static_cast<int32_t>(now - rxReadyAt) >= 0) {
+                    rxPending = false;
+                    regs[spec::reg::IRQ_STATUS] |= spec::irq::RX;
+                }
                 v = regs[lastCmd[1]];
                 for (int i = 0; i < 4; ++i) rsp[i] = uint8_t(v >> (8 * i));
                 rspLen = 4;
@@ -402,6 +420,8 @@ private:
                 break;
             case spec::cmd::RF_OFF:  // DS Table 38, Table 103
                 regs[spec::reg::RF_STATUS] &= ~spec::rfstatus::TX_RF_STATUS;
+                ++rfOffs;
+                if (card != nullptr) card->halted = false;  // POWER-OFF  ISO/IEC 14443-3 6.3
                 for (FakeCardV* vc : vcards) {
                     if (vc != nullptr) vc->slot = -1;
                 }
@@ -440,6 +460,20 @@ private:
             return;
         }
         if (card == nullptr) return;
+        ++framesA;
+        if (lastCmd[1] == 7 && lastCmdLen == 3) ++requestsA;  // REQA/WUPA short frame
+        if (faultSkipA > 0) {
+            --faultSkipA;
+        } else if (muteA > 0) {  // the card misses the frame and drops back to IDLE
+            --muteA;
+            return;
+        } else if (garbleA > 0) {  // a noise burst instead of the answer
+            --garbleA;
+            rfRx[0] = 0x0B;
+            regs[spec::reg::RX_STATUS] = 1u | spec::rxstatus::COLLISION_DETECTED;
+            regs[spec::reg::IRQ_STATUS] |= spec::irq::RX;
+            return;
+        }
         size_t n = 0;
         uint32_t extra = 0;
         const bool txCrc = (regs[spec::reg::CRC_TX_CONFIG] & spec::kCrcTxEnable) != 0;
@@ -454,6 +488,7 @@ private:
     // removed; a frame too short to hold a CRC (4-bit ACK/NAK) then fails
     // the check -> DATA_INTEGRITY_ERROR, as a real CRC check would.
     void sendDataT2T() {
+        rxPending = false;  // a new frame replaces any answer still in flight
         if (rfTxConfig != spec::kRfConfigIso14443a106Tx) return;
         uint8_t air[300];
         size_t airLen = lastCmdLen - 2;
@@ -479,6 +514,11 @@ private:
         std::memcpy(rfRx, out, n);
         regs[spec::reg::RX_STATUS] = static_cast<uint32_t>(n) | st |
                                      (uint32_t(bits) << spec::rxstatus::NUM_LAST_BITS_SHIFT);
+        if (lastCmdLen > 2 && lastCmd[2] == 0xA2 && t2t->writeAckDelayMs > 0) {
+            rxPending = true;  // slow EEPROM write: ACK later
+            rxReadyAt = now + t2t->writeAckDelayMs;
+            return;
+        }
         regs[spec::reg::IRQ_STATUS] |= spec::irq::RX;
     }
 

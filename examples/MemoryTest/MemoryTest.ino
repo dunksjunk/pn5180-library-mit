@@ -6,7 +6,9 @@
 //   ESP32-D0WD-V3 dev board + generic PN5180 module
 //   SCK 18, MISO 19, MOSI 23, NSS 16, BUSY 5, RST 17, IRQ not connected.
 //
-// Every ~500 ms: a 14443A poll (activate one card), then an ISO 15693 poll
+// Every ~500 ms: a 14443A poll (activate one card, retried up to three times
+// after a garbled or missing answer, Iso14443a::activateWithRetry; only an
+// error that persists is printed), then an ISO 15693 poll
 // (16-slot inventory), with the RF field off in between and after. Each card
 // is tested ONCE until it has left the field (absent for FORGET_AFTER_POLLS
 // polls), to save EEPROM write cycles:
@@ -278,7 +280,8 @@ void pollA() {
         return;
     }
     pn5180::CardA card;
-    s = readerA.activate(card);
+    // A single garbled or missing answer is retried (bounded, see ActivateRetry).
+    s = readerA.activateWithRetry(card);
     if (pn5180::ok(s)) {
         if (!alreadyTested(seenA, 2, card.uid, card.uidLen) &&
             remember(seenA, 2, card.uid, card.uidLen)) {

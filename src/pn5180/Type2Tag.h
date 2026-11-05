@@ -39,14 +39,16 @@ constexpr uint8_t kCcReadAccessShift = 4;     // CC3 b7..b4: read access
 constexpr uint8_t kCcWriteAccessMask = 0x0F;  // CC3 b3..b0: write access
 constexpr uint8_t kCcAccessGranted = 0x0;     // 0h: access granted without security
 
-// Host receive timeouts. READ answers within the 14443-3 frame delay time
-// (well under 1 ms of airtime here); WRITE answers after the tag has
-// programmed its memory. The T2T specification bounds the WRITE response
-// time in the low-millisecond range; 10 ms is a conservative host policy
-// above it (see the questions in the M4 notes) and includes 1 ms for the
-// granularity of the millisecond clock.
+// Host receive timeouts (host policy, not from a cited spec clause). READ
+// answers within the ISO/IEC 14443-3 frame delay time (well under 1 ms of
+// airtime here). WRITE answers after the tag has programmed its memory.
+// Measured on the reference test bed (NTAG215, ESP32 at 1 MHz SPI,
+// 2026-11-04, 20 writes): the whole Type2Tag::write() call, including the
+// SPI traffic around the exchange, took 7.2..12.8 ms, so the ACK came less
+// than 12.8 ms after the frame. 20 ms leaves about 1.5x margin over that
+// upper bound, including 1 ms for the granularity of the millisecond clock.
 constexpr uint32_t kReadTimeoutMs = 5;
-constexpr uint32_t kWriteTimeoutMs = 10;
+constexpr uint32_t kWriteTimeoutMs = 20;
 }  // namespace t2t
 
 // Decoded Capability Container (page 3).            T2T (Capability Container)

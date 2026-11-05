@@ -96,6 +96,9 @@ constexpr uint32_t kPowerUpMs = 1;
 // Write alternative with option flag 0: the VICC answers once programming
 // is done, at the latest 20 ms after the request's EOF.
 //                                                  ISO/IEC 15693-3 (write alternatives)
+// Cross-check on the reference test bed (two ISO 15693 cards, 10 writes
+// each, 2026-11-04): the whole writeBlock() call took 13.1..13.6 ms
+// including the SPI traffic, inside the timeout derived from this bound.
 constexpr uint32_t kWriteMaxNs = 20000000u;
 
 // Host receive timeout for a request of `reqBytes` and a response of up to

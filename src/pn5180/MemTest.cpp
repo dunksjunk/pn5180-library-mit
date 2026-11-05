@@ -95,7 +95,7 @@ Status Type2TagPage::recover() {
         return s;
     }
     CardA card;
-    s = reader_->activate(card, true);  // WUPA  ISO/IEC 14443-3 6.4.1
+    s = reader_->activateWithRetry(card, true);  // WUPA  ISO/IEC 14443-3 6.4.1
     if (!ok(s)) {
         return s;
     }

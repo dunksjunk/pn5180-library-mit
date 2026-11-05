@@ -37,6 +37,8 @@ def main() -> int:
     ap.add_argument("--expect", action="append", default=[], help="regex that must appear (repeatable)")
     ap.add_argument("--fail", action="append", default=[], help="regex that must NOT appear (repeatable)")
     ap.add_argument("--until", help="stop capturing early once this regex appears")
+    ap.add_argument("--min-count", action="append", default=[], metavar="N:REGEX",
+                    help="REGEX must match at least N lines (repeatable)")
     args = ap.parse_args()
 
     try:
@@ -73,6 +75,12 @@ def main() -> int:
 
     problems = [f"missing expected output /{p}/" for p in args.expect if not re.search(p, out)]
     problems += [f"forbidden output /{p}/ present" for p in args.fail if re.search(p, out)]
+    for spec in args.min_count:
+        n, pat = spec.split(":", 1)
+        got = sum(1 for line in out.splitlines() if re.search(pat, line))  # lines, not matches
+        print(f"hil_check: /{pat}/ matched {got} line(s), need >= {n}")
+        if got < int(n):
+            problems.append(f"/{pat}/ matched {got} times, need >= {n}")
     if re.search(CRASH, out):
         problems.append("board crashed or reset (panic / watchdog)")
 

@@ -188,9 +188,19 @@ constexpr uint32_t kRfControlRxGainMask = 0x3u;
 // RX_GAIN of the documented ISO 14443-A 106 receiver default RF_CONTROL_RX
 // = 0x1E (bits 1:0 = 10b).                                   DS Table 172, Table 108
 constexpr uint32_t kRxGainIso14443a106 = 0x2u;
-// Documented ISO 14443-A 106 receiver default SIGPRO_RM_CONFIG (MIN_LEVEL,
-// bits 15:12, = 3).                                          DS Table 172, Table 102
-constexpr uint32_t kSigproRmConfigIso14443a106 = 0x430DCu;
+// ISO 14443-A 106 receiver SIGPRO_RM_CONFIG: the documented default 0x430DC
+// (DS Table 172) with MIN_LEVEL (bits 15:12) raised from 3 to 5; all other
+// fields unchanged. DS Table 102: "The MinLevel should be higher than the
+// noise level in the system." Measured on the reference test bed (NTAG215 +
+// two ISO 15693 cards stacked, 110 interleaved activations per setting,
+// 2026-11-04): MIN_LEVEL 3 failed 7/110 (garbage frames flagged as collision
+// / parity errors), MIN_LEVEL 5 failed 0/110.            DS Table 102, Table 172
+constexpr uint32_t kSigproMinLevelMask = 0xF000u;           // MIN_LEVEL  DS Table 102
+constexpr uint32_t kSigproMinLevelShift = 12;               // DS Table 102
+constexpr uint32_t kSigproMinLevelIso14443a106 = 5;         // measured, see above
+constexpr uint32_t kSigproRmConfigIso14443a106 =
+    (0x430DCu & ~kSigproMinLevelMask) | (kSigproMinLevelIso14443a106 << kSigproMinLevelShift);
+static_assert(kSigproRmConfigIso14443a106 == 0x450DCu, "SIGPRO_RM_CONFIG for 14443-A");
 
 // LOAD_RF_CONFIG indexes for ISO/IEC 15693 ASK100, 26 kbit/s.  DS Table 32; AN12650 4.2.3 line 1
 constexpr uint8_t kRfConfigIso15693Ask100Tx = 0x0D;

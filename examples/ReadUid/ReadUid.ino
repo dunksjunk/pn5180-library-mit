@@ -6,11 +6,14 @@
 //   ESP32-D0WD-V3 dev board + generic PN5180 module
 //   SCK 18, MISO 19, MOSI 23, NSS 16, BUSY 5, RST 17, IRQ not connected.
 //
-// Every ~500 ms: RF field on, REQA + anticollision/SELECT, print
+// Every ~500 ms: RF field on, REQA + anticollision/SELECT (retried up to
+// three times after a garbled or missing answer, Iso14443a::activateWithRetry),
+// print
 //   UID: 04 A1 B2 C3 D4 E5 F6  ATQA: 0044  SAK: 00
-// then HLTA and RF field off. No card: nothing is printed. Any other error
-// is printed by Status name. Device/transport errors (and a failed RF off)
-// trigger a hardware reset; a failed start-up is retried every 5 s.
+// then HLTA and RF field off. No card: nothing is printed. An error that
+// persists over all attempts is printed by Status name. Device/transport
+// errors (and a failed RF off) trigger a hardware reset; a failed start-up
+// is retried every 5 s.
 
 #include <SPI.h>
 
@@ -120,7 +123,8 @@ void pollOnce() {
         return;
     }
     pn5180::CardA card;
-    s = reader.activate(card);
+    // A single garbled or missing answer is retried (bounded, see ActivateRetry).
+    s = reader.activateWithRetry(card);
     if (pn5180::ok(s)) {
         printCard(card);
         if (!check("HLTA", reader.halt())) {
