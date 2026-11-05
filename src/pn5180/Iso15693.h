@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Rich Dunkel
 //
-// ISO/IEC 15693 (vicinity cards) INVENTORY on top of Pn5180::transceive().
+// ISO/IEC 15693 (vicinity cards) INVENTORY and addressed memory commands
+// (GET SYSTEM INFORMATION, READ/WRITE SINGLE BLOCK) on top of
+// Pn5180::transceive().
 // Portable core: no Arduino.h, no heap.
 //
 // Card-side protocol per the public standard ISO/IEC 15693-2/-3 (clauses are
@@ -30,10 +32,27 @@ namespace iso15693 {
 constexpr uint8_t FLAG_DATA_RATE_HIGH = 0x02;  // b2: high data rate
 constexpr uint8_t FLAG_INVENTORY = 0x04;       // b3: inventory flag
 constexpr uint8_t FLAG_NB_SLOTS_ONE = 0x20;    // b6 (inventory set): 1 slot, clear = 16
+constexpr uint8_t FLAG_ADDRESS = 0x20;         // b6 (inventory clear): addressed, UID follows
+constexpr uint8_t FLAG_OPTION = 0x40;          // b7: command-specific option
 // Response flags                                  ISO/IEC 15693-3 (response flags)
 constexpr uint8_t RESP_FLAG_ERROR = 0x01;  // b1: error, an error code follows
-// Command code                                    ISO/IEC 15693-3 (inventory)
+// Command codes                                   ISO/IEC 15693-3 (command codes)
 constexpr uint8_t CMD_INVENTORY = 0x01;
+constexpr uint8_t CMD_READ_SINGLE_BLOCK = 0x20;
+constexpr uint8_t CMD_WRITE_SINGLE_BLOCK = 0x21;
+constexpr uint8_t CMD_GET_SYSTEM_INFO = 0x2B;
+// Addressed request at high data rate: flags 22h.  ISO/IEC 15693-3 (request flags)
+constexpr uint8_t kRequestFlagsAddressed = FLAG_DATA_RATE_HIGH | FLAG_ADDRESS;
+// GET SYSTEM INFORMATION info flags.               ISO/IEC 15693-3 (get system information)
+constexpr uint8_t INFO_DSFID = 0x01;
+constexpr uint8_t INFO_AFI = 0x02;
+constexpr uint8_t INFO_MEMORY_SIZE = 0x04;  // 2 bytes: blocks - 1, block size - 1 (b5..b1)
+constexpr uint8_t INFO_IC_REFERENCE = 0x08;
+constexpr uint8_t kBlockSizeMask = 0x1F;    // block size in bytes - 1, 5 bits
+// Block security status (READ with option flag): b1 = block locked.
+//                                                  ISO/IEC 15693-3 (block security status)
+constexpr uint8_t SECURITY_LOCKED = 0x01;
+constexpr size_t kMaxBlockBytes = 32;       // 5-bit block size field -> 1..32 bytes
 constexpr uint8_t kMaskLengthNone = 0x00;  // mask length 0: every card takes part
 
 constexpr uint8_t kRequestFlags1Slot = FLAG_DATA_RATE_HIGH | FLAG_INVENTORY | FLAG_NB_SLOTS_ONE;  // 26h
@@ -73,7 +92,47 @@ constexpr uint32_t kT2Ms = (kT2Ns + 999999u) / 1000000u;
 // VICC power-up: a card must be ready for a request within 1 ms of the field
 // being switched on.                                ISO/IEC 15693-3 (power-up)
 constexpr uint32_t kPowerUpMs = 1;
+
+// Write alternative with option flag 0: the VICC answers once programming
+// is done, at the latest 20 ms after the request's EOF.
+//                                                  ISO/IEC 15693-3 (write alternatives)
+constexpr uint32_t kWriteMaxNs = 20000000u;
+
+// Host receive timeout for a request of `reqBytes` and a response of up to
+// `respBytes` (both without CRC): request + t1 + `extraNs` + response on air,
+// rounded up to whole ms, +1 ms for the millisecond clock granularity. Same
+// model as kSlotNs above.
+constexpr uint32_t exchangeTimeoutMs(size_t reqBytes, size_t respBytes, uint32_t extraNs = 0) {
+    return static_cast<uint32_t>(
+               ((((reqBytes + kCrcBytes) * 8u + kDelimiterBits) +
+                 ((respBytes + kCrcBytes) * 8u + kDelimiterBits)) *
+                    spec::kIso15693BitNs +
+                kT1Ns + extraNs + 999999u) /
+               1000000u) +
+           1u;
+}
+// Requests: flags, command, UID [, block [, data]].
+constexpr size_t kAddressedHeaderBytes = 2 + kUidBytes;
+// Responses: flags, info flags, UID, DSFID, AFI, memory size (2), IC ref.
+constexpr size_t kSystemInfoMaxBytes = 2 + kUidBytes + 1 + 1 + 2 + 1;
+constexpr uint32_t kSystemInfoTimeoutMs =
+    exchangeTimeoutMs(kAddressedHeaderBytes, kSystemInfoMaxBytes);
+constexpr uint32_t kReadBlockTimeoutMs =
+    exchangeTimeoutMs(kAddressedHeaderBytes + 1, 2 + kMaxBlockBytes);
+constexpr uint32_t kWriteBlockTimeoutMs =
+    exchangeTimeoutMs(kAddressedHeaderBytes + 1 + kMaxBlockBytes, 2, kWriteMaxNs);
 }  // namespace iso15693
+
+// GET SYSTEM INFORMATION answer.                  ISO/IEC 15693-3 (get system information)
+struct SystemInfo15693 {
+    uint8_t infoFlags = 0;    // iso15693::INFO_*: which fields below are valid
+    uint8_t uid[8] = {};      // MSB first, as CardV
+    uint8_t dsfid = 0;
+    uint8_t afi = 0;
+    uint16_t blockCount = 0;  // number of blocks (0 if INFO_MEMORY_SIZE absent)
+    uint8_t blockSize = 0;    // bytes per block (0 if INFO_MEMORY_SIZE absent)
+    uint8_t icReference = 0;
+};
 
 struct InventoryResult {
     CardV cards[iso15693::kSlots];
@@ -81,6 +140,7 @@ struct InventoryResult {
     uint16_t collisionSlots = 0;  // bit n: slot n had an unusable (garbled) answer
 };
 
+// Not thread-safe; shares the single-owner rule of Pn5180 (see Pn5180.h).
 class Iso15693 {
 public:
     explicit Iso15693(Pn5180& nfc) : nfc_(nfc) {}
@@ -116,13 +176,47 @@ public:
     //   other      device error; the inventory was aborted
     Status inventory16(InventoryResult& result);
 
+    // ---- Addressed memory commands (flags 22h + UID, LSB first on air) ----
+    // `uid` is MSB first (CardV::uid). For all of them:
+    //   CardError  the card set the error flag (lastErrorCode() holds the
+    //              ISO/IEC 15693-3 error code) or answered malformed
+    //   NoResponse no answer (wrong UID, card gone)
+    // The field must be on (fieldOn()); each command uses its own timeout.
+
+    // GET SYSTEM INFORMATION 2Bh. The UID in the answer must match `uid`.
+    Status getSystemInfo(const uint8_t uid[iso15693::kUidBytes], SystemInfo15693& info);
+
+    // READ SINGLE BLOCK 20h. `blockSize` = bytes per block (1..32, e.g. from
+    // getSystemInfo); the answer must be exactly that long. With
+    // `withSecurity` the option flag is set and the block security status
+    // byte is stored in `security` (required then, may be nullptr otherwise).
+    Status readBlock(const uint8_t uid[iso15693::kUidBytes], uint8_t block, uint8_t* out,
+                     size_t blockSize, bool withSecurity = false, uint8_t* security = nullptr);
+
+    // WRITE SINGLE BLOCK 21h, option flag 0: the card answers after
+    // programming (timeout iso15693::kWriteBlockTimeoutMs).
+    Status writeBlock(const uint8_t uid[iso15693::kUidBytes], uint8_t block, const uint8_t* data,
+                      size_t blockSize);
+
+    // ISO/IEC 15693-3 error code of the last addressed command that came
+    // back with the error flag; 0 after a command without a card error.
+    uint8_t lastErrorCode() const { return lastErrorCode_; }
+
 private:
+    // Sends `req` and checks the response flags. On success `rx`/`n` hold
+    // the response without CRC (flags byte included).
+    Status addressed(const uint8_t* req, size_t reqLen, uint8_t* rx, size_t rxCap, size_t& n,
+                     uint32_t timeoutMs);
+    // Writes flags, command and the UID (LSB first); returns the length.
+    static size_t putHeader(uint8_t* req, uint8_t flags, uint8_t cmd, const uint8_t* uid);
+
     // One exchange; maps the answer to `card` (see inventory()).
     Status exchange(const uint8_t* tx, size_t txLen, CardV& card);
     Status runSlots(InventoryResult& result);
 
     Pn5180& nfc_;
     uint32_t timeoutMs_ = iso15693::kSlotTimeoutMs;
+    uint8_t lastErrorCode_ = 0;
 };
 
 }  // namespace pn5180

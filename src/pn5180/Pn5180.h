@@ -26,6 +26,13 @@ struct Versions {
     Version eeprom;    // EEPROM 0x14  DS Table 51
 };
 
+// Thread safety: none. A Pn5180 and every protocol object built on it
+// (Iso14443a, Iso15693, Type2Tag, MemTest, ...) form one single-owner unit. Protocol operations
+// span several chip commands and temporarily change chip registers (e.g.
+// TX_CONFIG, CRC settings) that they restore afterwards, so two tasks must
+// never use the same chip concurrently. If several tasks need the reader,
+// the application serialises access (e.g. one mutex held around each whole
+// protocol operation, from fieldOn() to fieldOff()).
 class Pn5180 {
 public:
     explicit Pn5180(Hal& hal) : hal_(hal), transport_(hal) {}

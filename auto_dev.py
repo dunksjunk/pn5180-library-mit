@@ -79,6 +79,7 @@ PROTECTED_PATHS = ("auto_dev.py", "tools/")
 CLAUDE_ALLOWED_TOOLS = [
     "Read", "Edit", "Write", "Glob", "Grep",
     "Bash(arduino-cli compile:*)",
+    "Bash(arduino-cli upload -p COM6:*)",  # test bed; user-approved for this project
     "Bash(cppcheck:*)",
     "Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)",
 ]

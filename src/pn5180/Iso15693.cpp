@@ -129,4 +129,140 @@ Status Iso15693::inventory16(InventoryResult& result) {
     return result.collisionSlots != 0 ? Status::Collision : Status::NoResponse;
 }
 
+size_t Iso15693::putHeader(uint8_t* req, uint8_t flags, uint8_t cmd, const uint8_t* uid) {
+    // flags, command code, UID LSB first.  ISO/IEC 15693-3 (request format, UID)
+    req[0] = flags;
+    req[1] = cmd;
+    for (size_t i = 0; i < kUidBytes; ++i) {
+        req[2 + i] = uid[kUidBytes - 1 - i];
+    }
+    return kAddressedHeaderBytes;
+}
+
+Status Iso15693::addressed(const uint8_t* req, size_t reqLen, uint8_t* rx, size_t rxCap, size_t& n,
+                           uint32_t timeoutMs) {
+    lastErrorCode_ = 0;
+    uint8_t lastBits = 0;
+    // CRC on both ways was set by fieldOn(); the PN5180 strips the received
+    // CRC (DS Table 92), so `n` excludes it.
+    const Status s = nfc_.transceive(req, reqLen, 0, rx, rxCap, n, lastBits, timeoutMs);
+    if (!ok(s)) {
+        return s;
+    }
+    if (n < 1 || lastBits != 0) {
+        return Status::CardError;
+    }
+    // Error flag set: one error code byte follows.  ISO/IEC 15693-3 (response flags, error codes)
+    if ((rx[0] & RESP_FLAG_ERROR) != 0) {
+        lastErrorCode_ = n == 2 ? rx[1] : 0;
+        return Status::CardError;
+    }
+    return Status::Ok;
+}
+
+Status Iso15693::getSystemInfo(const uint8_t uid[kUidBytes], SystemInfo15693& info) {
+    if (uid == nullptr) {
+        return Status::InvalidArgument;
+    }
+    uint8_t req[kAddressedHeaderBytes] = {};
+    const size_t len = putHeader(req, kRequestFlagsAddressed, CMD_GET_SYSTEM_INFO, uid);
+    uint8_t rx[kSystemInfoMaxBytes + 4] = {};
+    size_t n = 0;
+    const Status s = addressed(req, len, rx, sizeof(rx), n, kSystemInfoTimeoutMs);
+    if (!ok(s)) {
+        return s;
+    }
+    // flags, info flags, UID (LSB first), then the optional fields in this
+    // order: DSFID, AFI, memory size (2), IC reference.
+    //                                     ISO/IEC 15693-3 (get system information response)
+    if (n < 2 + kUidBytes) {
+        return Status::CardError;
+    }
+    SystemInfo15693 out;
+    out.infoFlags = rx[1];
+    for (size_t i = 0; i < kUidBytes; ++i) {
+        out.uid[i] = rx[2 + kUidBytes - 1 - i];
+        if (out.uid[i] != uid[i]) {
+            return Status::CardError;  // another card answered
+        }
+    }
+    size_t p = 2 + kUidBytes;
+    const size_t need = p + ((out.infoFlags & INFO_DSFID) ? 1 : 0) +
+                        ((out.infoFlags & INFO_AFI) ? 1 : 0) +
+                        ((out.infoFlags & INFO_MEMORY_SIZE) ? 2 : 0) +
+                        ((out.infoFlags & INFO_IC_REFERENCE) ? 1 : 0);
+    if (n != need) {
+        return Status::CardError;
+    }
+    if (out.infoFlags & INFO_DSFID) {
+        out.dsfid = rx[p++];
+    }
+    if (out.infoFlags & INFO_AFI) {
+        out.afi = rx[p++];
+    }
+    if (out.infoFlags & INFO_MEMORY_SIZE) {
+        // Both fields hold "value - 1".  ISO/IEC 15693-3 (VICC memory size)
+        out.blockCount = static_cast<uint16_t>(rx[p] + 1u);
+        out.blockSize = static_cast<uint8_t>((rx[p + 1] & kBlockSizeMask) + 1u);
+        p += 2;
+    }
+    if (out.infoFlags & INFO_IC_REFERENCE) {
+        out.icReference = rx[p];
+    }
+    info = out;
+    return Status::Ok;
+}
+
+Status Iso15693::readBlock(const uint8_t uid[kUidBytes], uint8_t block, uint8_t* out,
+                           size_t blockSize, bool withSecurity, uint8_t* security) {
+    if (uid == nullptr || out == nullptr || blockSize == 0 || blockSize > kMaxBlockBytes ||
+        (withSecurity && security == nullptr)) {
+        return Status::InvalidArgument;
+    }
+    uint8_t req[kAddressedHeaderBytes + 1] = {};
+    const uint8_t flags =
+        static_cast<uint8_t>(kRequestFlagsAddressed | (withSecurity ? FLAG_OPTION : 0));
+    size_t len = putHeader(req, flags, CMD_READ_SINGLE_BLOCK, uid);
+    req[len++] = block;  // ISO/IEC 15693-3 (read single block)
+    uint8_t rx[2 + kMaxBlockBytes + 4] = {};
+    size_t n = 0;
+    const Status s = addressed(req, len, rx, sizeof(rx), n, kReadBlockTimeoutMs);
+    if (!ok(s)) {
+        return s;
+    }
+    // flags [, block security status], data.  ISO/IEC 15693-3 (read single block response)
+    const size_t head = withSecurity ? 2 : 1;
+    if (n != head + blockSize) {
+        return Status::CardError;
+    }
+    if (withSecurity) {
+        *security = rx[1];
+    }
+    for (size_t i = 0; i < blockSize; ++i) {
+        out[i] = rx[head + i];
+    }
+    return Status::Ok;
+}
+
+Status Iso15693::writeBlock(const uint8_t uid[kUidBytes], uint8_t block, const uint8_t* data,
+                            size_t blockSize) {
+    if (uid == nullptr || data == nullptr || blockSize == 0 || blockSize > kMaxBlockBytes) {
+        return Status::InvalidArgument;
+    }
+    uint8_t req[kAddressedHeaderBytes + 1 + kMaxBlockBytes] = {};
+    // Option flag 0: answer after programming.  ISO/IEC 15693-3 (write alternatives)
+    size_t len = putHeader(req, kRequestFlagsAddressed, CMD_WRITE_SINGLE_BLOCK, uid);
+    req[len++] = block;  // ISO/IEC 15693-3 (write single block)
+    for (size_t i = 0; i < blockSize; ++i) {
+        req[len++] = data[i];
+    }
+    uint8_t rx[4] = {};
+    size_t n = 0;
+    const Status s = addressed(req, len, rx, sizeof(rx), n, kWriteBlockTimeoutMs);
+    if (!ok(s)) {
+        return s;
+    }
+    return n == 1 ? Status::Ok : Status::CardError;  // flags only on success
+}
+
 }  // namespace pn5180

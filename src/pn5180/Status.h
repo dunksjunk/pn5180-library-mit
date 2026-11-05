@@ -19,7 +19,7 @@ enum class Status : uint8_t {
     BufferTooSmall,    // a fixed-size internal or caller buffer is too small
     WriteProtected,    // guarded operation (e.g. EEPROM write) not unlocked
     ChipError,         // the PN5180 raised GENERAL_ERROR_IRQ for the command
-    ReadOnly,          // write attempted to a read-only register
+    ReadOnly,          // write to a read-only register, or to a card the card marks read-only
     Unsupported,       // not available on the detected firmware version
     NoResponse,        // no RF response within the receive timeout (no card)
     Collision,         // RX_STATUS reported a bit collision (several cards)

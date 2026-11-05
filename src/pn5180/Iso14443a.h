@@ -40,6 +40,7 @@ constexpr uint8_t kShortFrameBits = 7;       // REQA/WUPA are 7-bit short frames
 constexpr size_t kMaxCascadeLevels = 3;
 }  // namespace iso14443a
 
+// Not thread-safe; shares the single-owner rule of Pn5180 (see Pn5180.h).
 class Iso14443a {
 public:
     explicit Iso14443a(Pn5180& nfc) : nfc_(nfc) {}

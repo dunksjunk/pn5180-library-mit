@@ -4,16 +4,20 @@
 // PC unit test of the portable core against a fake HAL (no hardware).
 // Build: g++ -std=c++17 -Wall -Wextra -Werror -Isrc -Itests/host tests/host/test_core.cpp
 //        src/pn5180/Transport.cpp src/pn5180/Pn5180.cpp src/pn5180/Status.cpp
-//        src/pn5180/Iso14443a.cpp src/pn5180/Iso15693.cpp
+//        src/pn5180/Iso14443a.cpp src/pn5180/Iso15693.cpp src/pn5180/Type2Tag.cpp
+//        src/pn5180/MemTest.cpp
 #include <cstdio>
 #include <cstring>
 
 #include "FakeHal.h"
 #include "pn5180/Iso14443a.h"
+#include "pn5180/MemTest.h"
 #include "pn5180/Pn5180.h"
+#include "pn5180/Type2Tag.h"
 
 using namespace pn5180;
 using fake::FakeCardA;
+using fake::FakeT2T;
 using fake::FakeCardV;
 using fake::FakeHal;
 
@@ -342,6 +346,317 @@ void testIso15693() {
     }
 }
 
+struct RigT2T {
+    FakeHal hal;
+    FakeT2T tag;
+    Pn5180 nfc{hal};
+    Iso14443a reader{nfc};
+    Type2Tag t2{nfc};
+    RigT2T() {
+        hal.t2t = &tag;
+        EXPECT(nfc.begin() == Status::Ok);
+        EXPECT(reader.fieldOn() == Status::Ok);
+    }
+    bool crcRxOn() const { return (hal.regs[spec::reg::CRC_RX_CONFIG] & spec::kCrcRxEnable) != 0; }
+};
+
+void testType2Tag() {
+    // CRC_A check value of "123456789" (ISO/IEC 14443-3 Annex B): BF05h.
+    EXPECT(fake::crcA(reinterpret_cast<const uint8_t*>("123456789"), 9) == 0xBF05);
+
+    // Read pages 0-3; CC decode -> data area pages 4..127.
+    {
+        RigT2T r;
+        uint8_t buf[16] = {};
+        EXPECT(r.t2.read(0, buf) == Status::Ok);
+        EXPECT(buf[0] == 0x04 && buf[12] == 0xE1 && buf[14] == 0x3E);
+        T2tCapability cc;
+        EXPECT(r.t2.capability(cc) == Status::Ok);
+        EXPECT(cc.dataBytes == 496 && cc.firstPage == 4 && cc.lastPage == 127 && !cc.readOnly);
+        EXPECT(cc.version == 0x10);
+        EXPECT(r.tag.ignored == 0);
+    }
+    // Write round trip; CRC RX restored; ACK seen. read() sets CRC on in both
+    // directions itself, so a CRC left off by another layer cannot break it
+    // (the fake would return 18 bytes with RX CRC off, or ignore the frame
+    // with TX CRC off).
+    {
+        RigT2T r;
+        const uint8_t d[4] = {0xDE, 0xAD, 0xBE, 0xEF};
+        EXPECT(r.t2.write(127, d) == Status::Ok);
+        EXPECT(r.t2.lastAckNak() == 0x0A);
+        EXPECT(r.crcRxOn());
+        EXPECT(std::memcmp(r.tag.mem[127], d, 4) == 0);
+        uint8_t buf[16] = {};
+        EXPECT(r.t2.read(127, buf) == Status::Ok);
+        EXPECT(std::memcmp(buf, d, 4) == 0);
+        EXPECT(r.nfc.setCrc(true, false) == Status::Ok);
+        EXPECT(r.t2.read(127, buf) == Status::Ok);  // read() turns RX CRC back on
+        EXPECT(r.crcRxOn());
+        EXPECT(r.nfc.setCrc(false, true) == Status::Ok);  // TX CRC off: tag would ignore
+        const int before = r.tag.ignored;
+        EXPECT(r.t2.read(127, buf) == Status::Ok);  // read() turns TX CRC back on
+        EXPECT(r.tag.ignored == before);
+        // Fake check: with RX CRC off the CRC_A stays in the buffer (18 bytes),
+        // which Type2Tag::read() would reject as CardError.
+        EXPECT(r.nfc.setCrc(true, false) == Status::Ok);
+        const uint8_t rd[2] = {t2t::CMD_READ, 127};
+        uint8_t raw[24] = {};
+        size_t n = 0;
+        uint8_t bits = 0;
+        EXPECT(r.nfc.transceive(rd, 2, 0, raw, sizeof(raw), n, bits, 5) == Status::Ok);
+        EXPECT(n == 18 && bits == 0);
+        EXPECT(r.hal.locks == 0);
+    }
+    // NAK -> CardError, CRC RX restored.
+    {
+        RigT2T r;
+        r.tag.nakWrites = true;
+        const uint8_t d[4] = {1, 2, 3, 4};
+        EXPECT(r.t2.write(10, d) == Status::CardError);
+        EXPECT(r.t2.lastAckNak() == 0x00);
+        EXPECT(r.crcRxOn());
+        EXPECT(r.tag.writes == 0);
+    }
+    // No answer to WRITE -> NoResponse, CRC RX still restored.
+    {
+        RigT2T r;
+        T2tCapability cc;
+        EXPECT(r.t2.capability(cc) == Status::Ok);
+        r.hal.t2t = nullptr;  // tag leaves the field
+        const uint8_t d[4] = {1, 2, 3, 4};
+        EXPECT(r.t2.write(10, d) == Status::NoResponse);
+        EXPECT(r.crcRxOn());
+    }
+    // Pages 0-3 and beyond the data area refused; read-only CC refuses writes.
+    {
+        RigT2T r;
+        const uint8_t d[4] = {1, 2, 3, 4};
+        EXPECT(r.t2.write(3, d) == Status::InvalidArgument);
+        EXPECT(r.t2.write(0, d) == Status::InvalidArgument);
+        EXPECT(r.t2.write(128, d) == Status::InvalidArgument);
+        EXPECT(r.tag.writes == 0);
+    }
+    {
+        RigT2T r;
+        r.tag.mem[3][3] = 0x0F;  // CC3 write access: none
+        const uint8_t d[4] = {1, 2, 3, 4};
+        EXPECT(r.t2.write(10, d) == Status::ReadOnly);
+        EXPECT(r.tag.writes == 0);
+        r.tag.mem[3][0] = 0x00;  // no CC magic
+        Type2Tag fresh(r.nfc);
+        T2tCapability cc;
+        EXPECT(fresh.capability(cc) == Status::CardError);
+        EXPECT(fresh.write(10, d) == Status::CardError);
+        EXPECT(r.tag.writes == 0);
+    }
+    // MemTest: pass; pattern differs from the original; original restored.
+    {
+        RigT2T r;
+        const uint8_t orig[4] = {0x11, 0x22, 0x33, 0x44};
+        std::memcpy(r.tag.mem[127], orig, 4);
+        Type2TagPage unit(r.t2, 127);
+        const uint8_t uid[7] = {0x04, 0xBB, 0x6A, 0x04, 0xCC, 0x2A, 0x81};
+        const MemTestResult m = runMemTest(unit, uid, sizeof(uid));
+        EXPECT(m.status == Status::Ok && m.step == MemTestStep::None && m.restored);
+        EXPECT(r.tag.writes == 2);
+        EXPECT(std::memcmp(r.tag.mem[127], orig, 4) == 0);
+        for (int i = 0; i < 4; ++i) EXPECT(m.pattern[i] != orig[i]);
+    }
+    // Failed verify (weak cell) -> original still written back and verified.
+    {
+        RigT2T r;
+        const uint8_t orig[4] = {0x11, 0x22, 0x33, 0x44};
+        std::memcpy(r.tag.mem[127], orig, 4);
+        r.tag.weakWrites = 1;
+        Type2TagPage unit(r.t2, 127);
+        const uint8_t uid[7] = {0x04, 0xBB, 0x6A, 0x04, 0xCC, 0x2A, 0x81};
+        const MemTestResult m = runMemTest(unit, uid, sizeof(uid));
+        EXPECT(m.status == Status::CardError && m.step == MemTestStep::VerifyPattern);
+        EXPECT(m.restored && m.restoreStatus == Status::Ok);
+        EXPECT(std::memcmp(r.tag.mem[127], orig, 4) == 0);
+    }
+}
+
+void testIso15693Memory() {
+    const uint8_t uid[8] = {0xE0, 0x1D, 0xA1, 0xE8, 0x3F, 0x9F, 0x9E, 0xD9};
+    auto setup = [&](Rig15693& r, FakeCardV& c, FakeCardV& other) {
+        std::memcpy(c.uidMsbFirst, uid, 8);
+        r.hal.vcards[0] = &c;
+        r.hal.vcards[1] = &other;  // a second card must stay silent when not addressed
+        EXPECT(r.reader.fieldOn() == Status::Ok);
+    };
+    // System info, read/write round trip, security status.
+    {
+        Rig15693 r;
+        FakeCardV c, other;
+        setup(r, c, other);
+        SystemInfo15693 info;
+        EXPECT(r.reader.getSystemInfo(uid, info) == Status::Ok);
+        EXPECT(info.infoFlags == 0x0F && info.blockCount == 28 && info.blockSize == 4);
+        EXPECT(info.icReference == 0x01 && std::memcmp(info.uid, uid, 8) == 0);
+        const uint8_t d[4] = {9, 8, 7, 6};
+        EXPECT(r.reader.writeBlock(uid, 27, d, 4) == Status::Ok);
+        EXPECT(std::memcmp(c.blocks[27], d, 4) == 0 && other.writes == 0);
+        uint8_t out[4] = {};
+        uint8_t sec = 0xFF;
+        EXPECT(r.reader.readBlock(uid, 27, out, 4, true, &sec) == Status::Ok);
+        EXPECT(sec == 0x00 && std::memcmp(out, d, 4) == 0);
+        EXPECT(r.reader.readBlock(uid, 27, out, 4) == Status::Ok);
+        EXPECT(r.reader.lastErrorCode() == 0);
+        // Wrong block size -> CardError (length mismatch), bad args refused.
+        EXPECT(r.reader.readBlock(uid, 27, out, 8) == Status::CardError);
+        EXPECT(r.reader.readBlock(uid, 27, out, 4, true, nullptr) == Status::InvalidArgument);
+        EXPECT(r.reader.writeBlock(uid, 27, d, 0) == Status::InvalidArgument);
+        // Timeouts: write includes the 20 ms programming window.
+        static_assert(iso15693::kWriteBlockTimeoutMs > 20, "write window missing");
+        static_assert(iso15693::kReadBlockTimeoutMs < 20, "read timeout too long");
+    }
+    // Locked block: security status reports it; write -> error 12h.
+    {
+        Rig15693 r;
+        FakeCardV c, other;
+        setup(r, c, other);
+        c.locked[27] = true;
+        uint8_t out[4] = {};
+        uint8_t sec = 0;
+        EXPECT(r.reader.readBlock(uid, 27, out, 4, true, &sec) == Status::Ok);
+        EXPECT((sec & iso15693::SECURITY_LOCKED) != 0);
+        const uint8_t d[4] = {1, 2, 3, 4};
+        EXPECT(r.reader.writeBlock(uid, 27, d, 4) == Status::CardError);
+        EXPECT(r.reader.lastErrorCode() == 0x12);
+        EXPECT(c.writes == 0);
+        // Block out of range -> error 10h; next success clears the code.
+        EXPECT(r.reader.readBlock(uid, 200, out, 4) == Status::CardError);
+        EXPECT(r.reader.lastErrorCode() == 0x10);
+        EXPECT(r.reader.readBlock(uid, 0, out, 4) == Status::Ok);
+        EXPECT(r.reader.lastErrorCode() == 0);
+    }
+    // Regressions: other UID -> NoResponse; RX CRC off -> CardError; TX CRC
+    // off -> card ignores the frame; bad card CRC -> IntegrityError.
+    {
+        Rig15693 r;
+        FakeCardV c, other;
+        setup(r, c, other);
+        SystemInfo15693 info;
+        uint8_t wrong[8];
+        std::memcpy(wrong, uid, 8);
+        wrong[7] ^= 0x01;
+        EXPECT(r.reader.getSystemInfo(wrong, info) == Status::NoResponse);
+        EXPECT(r.nfc.setCrc(true, false) == Status::Ok);
+        EXPECT(r.reader.getSystemInfo(uid, info) == Status::CardError);
+        EXPECT(r.nfc.setCrc(false, true) == Status::Ok);
+        EXPECT(r.reader.getSystemInfo(uid, info) == Status::NoResponse);
+        EXPECT(r.nfc.setCrc(true, true) == Status::Ok);
+        c.corruptCrc = true;
+        EXPECT(r.reader.getSystemInfo(uid, info) == Status::IntegrityError);
+    }
+    // MemTest on a 15693 block: pass and original restored.
+    {
+        Rig15693 r;
+        FakeCardV c, other;
+        setup(r, c, other);
+        const uint8_t orig[4] = {0xAA, 0xBB, 0xCC, 0xDD};
+        std::memcpy(c.blocks[27], orig, 4);
+        Iso15693Block unit(r.reader, uid, 27, 4);
+        const MemTestResult m = runMemTest(unit, uid, 8);
+        EXPECT(m.status == Status::Ok && m.restored);
+        EXPECT(c.writes == 2 && std::memcmp(c.blocks[27], orig, 4) == 0);
+        // Locked: pattern write fails, restore also fails, nothing changed.
+        c.locked[27] = true;
+        const MemTestResult l = runMemTest(unit, uid, 8);
+        EXPECT(l.status == Status::CardError && l.step == MemTestStep::WritePattern);
+        EXPECT(!l.restored && std::memcmp(c.blocks[27], orig, 4) == 0);
+    }
+}
+
+// Scripted memory unit: fails the next `failReads`/`failWrites` calls with
+// `err` (a failed write still stores the data, like a lost ACK).
+struct FlakyUnit final : MemoryUnit {
+    uint8_t mem[4] = {0x11, 0x22, 0x33, 0x44};
+    int failReads = 0, failWrites = 0, recovers = 0, writes = 0;
+    Status err = Status::Collision;
+    Status recoverResult = Status::Ok;
+    size_t size() const override { return 4; }
+    Status read(uint8_t* out) override {
+        if (failReads > 0) { --failReads; return err; }
+        std::memcpy(out, mem, 4);
+        return Status::Ok;
+    }
+    Status write(const uint8_t* in) override {
+        std::memcpy(mem, in, 4);
+        ++writes;
+        if (failWrites > 0) { --failWrites; return err; }
+        return Status::Ok;
+    }
+    Status recover() override { ++recovers; return recoverResult; }
+};
+
+void testMemTestRetry() {
+    const uint8_t orig[4] = {0x11, 0x22, 0x33, 0x44};
+    const uint8_t seed[2] = {0x04, 0xBB};
+    // Lost ACK on the restore write: recovered and retried, original back.
+    {
+        FlakyUnit u;
+        const MemTestResult m0 = runMemTest(u, seed, 2);  // baseline: 2 writes
+        EXPECT(m0.status == Status::Ok && u.recovers == 0 && u.writes == 2);
+    }
+    {
+        FlakyUnit u;
+        // pattern write ok, then the restore write's answer is garbled once
+        struct R final : MemoryUnit {
+            FlakyUnit& f; int n = 0;
+            explicit R(FlakyUnit& x) : f(x) {}
+            size_t size() const override { return 4; }
+            Status read(uint8_t* o) override { return f.read(o); }
+            Status write(const uint8_t* in) override {
+                if (++n == 2) f.failWrites = 1;
+                return f.write(in);
+            }
+            Status recover() override { return f.recover(); }
+        } r(u);
+        const MemTestResult m = runMemTest(r, seed, 2);
+        EXPECT(m.status == Status::Ok && m.restored);
+        EXPECT(u.recovers == 1 && std::memcmp(u.mem, orig, 4) == 0);
+    }
+    // Garbled first read of the original: retried, test passes.
+    {
+        FlakyUnit u;
+        u.failReads = 1;
+        u.err = Status::NoResponse;
+        const MemTestResult m = runMemTest(u, seed, 2);
+        EXPECT(m.status == Status::Ok && u.recovers == 1);
+        EXPECT(std::memcmp(m.original, orig, 4) == 0);
+    }
+    // Persistent transient error: gives up after kMemTestAttempts.
+    {
+        FlakyUnit u;
+        u.failWrites = 100;
+        const MemTestResult m = runMemTest(u, seed, 2);
+        EXPECT(m.status == Status::Collision && m.step == MemTestStep::WritePattern);
+        EXPECT(!m.restored);
+        EXPECT(u.writes == 2 * kMemTestAttempts);
+    }
+    // Card errors (NAK, mismatch) are not retried.
+    {
+        FlakyUnit u;
+        u.failWrites = 1;
+        u.err = Status::CardError;
+        const MemTestResult m = runMemTest(u, seed, 2);
+        EXPECT(m.status == Status::CardError && u.recovers == 0);
+        EXPECT(m.restored && std::memcmp(u.mem, orig, 4) == 0);
+    }
+    // recover() finds another card: stop retrying, report it.
+    {
+        FlakyUnit u;
+        u.failWrites = 1;
+        u.recoverResult = Status::CardError;
+        const MemTestResult m = runMemTest(u, seed, 2);
+        EXPECT(m.status == Status::CardError && m.step == MemTestStep::WritePattern);
+        EXPECT(u.recovers >= 1);
+    }
+}
+
 void testRecoveryPolicy() {
     EXPECT(requiresRecovery(Status::BusyTimeout));
     EXPECT(requiresRecovery(Status::IrqTimeout));
@@ -362,10 +677,13 @@ void testRecoveryPolicy() {
 }  // namespace
 
 int main() {
+    testMemTestRetry();
     testRecoveryPolicy();
     testCore();
     testIso14443a();
     testIso15693();
+    testType2Tag();
+    testIso15693Memory();
     if (failures == 0) {
         std::printf("all tests passed\n");
         return 0;

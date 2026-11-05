@@ -88,6 +88,77 @@ private:
     }
 };
 
+// CRC_A of ISO/IEC 14443-3 Annex B: polynomial 1021h processed LSB first
+// (8408h reflected), preset 6363h, no final inversion, sent LSB first.
+inline uint16_t crcA(const uint8_t* p, size_t n) {
+    uint16_t crc = 0x6363;
+    for (size_t i = 0; i < n; ++i) {
+        crc ^= p[i];
+        for (int b = 0; b < 8; ++b) crc = (crc & 1) ? uint16_t((crc >> 1) ^ 0x8408) : uint16_t(crc >> 1);
+    }
+    return crc;
+}
+
+// Simulated NFC Forum Type 2 Tag (already activated). Frames arrive as on
+// air: READ/WRITE must carry a correct CRC_A or the tag ignores them.
+// Answers: READ -> 16 bytes + CRC_A; WRITE -> 4-bit ACK (Ah) or NAK (0h).
+struct FakeT2T {
+    static constexpr int kPages = 135;
+    uint8_t mem[kPages][4] = {};
+    bool nakWrites = false;      // answer every WRITE with NAK
+    int weakWrites = 0;          // n > 0: the next n WRITEs store data ^ 01h (still ACK)
+    int writes = 0;              // ACKed writes
+    int ignored = 0;             // frames ignored for a bad/missing CRC
+
+    FakeT2T() {
+        // CC: E1h, version 1.0, 496 bytes data area (pages 4..127), RW.
+        const uint8_t cc[4] = {0xE1, 0x10, 0x3E, 0x00};
+        std::memcpy(mem[3], cc, 4);
+        const uint8_t p0[4] = {0x04, 0xBB, 0x6A, 0x5D};
+        std::memcpy(mem[0], p0, 4);
+    }
+
+    // Returns the answer; `lastBits` = valid bits of the last byte (0 = 8).
+    bool respond(const uint8_t* in, size_t len, uint8_t* out, size_t& outLen, uint8_t& lastBits) {
+        outLen = 0;
+        lastBits = 0;
+        if (len < 3 || crcA(in, len - 2) != uint16_t(in[len - 2] | (in[len - 1] << 8))) {
+            ++ignored;
+            return false;
+        }
+        if (in[0] == 0x30 && len == 4) {  // READ
+            if (in[1] >= kPages) return nak(out, outLen, lastBits);
+            for (int i = 0; i < 16; ++i) out[i] = mem[(in[1] + i / 4) % kPages][i % 4];
+            const uint16_t c = crcA(out, 16);
+            out[16] = uint8_t(c);
+            out[17] = uint8_t(c >> 8);
+            outLen = 18;
+            return true;
+        }
+        if (in[0] == 0xA2 && len == 8) {  // WRITE
+            if (nakWrites || in[1] >= kPages) return nak(out, outLen, lastBits);
+            for (int i = 0; i < 4; ++i) {
+                mem[in[1]][i] = weakWrites > 0 ? uint8_t(in[2 + i] ^ 0x01) : in[2 + i];
+            }
+            if (weakWrites > 0) --weakWrites;
+            ++writes;
+            out[0] = 0x0A;
+            outLen = 1;
+            lastBits = 4;
+            return true;
+        }
+        return false;
+    }
+
+private:
+    static bool nak(uint8_t* out, size_t& outLen, uint8_t& lastBits) {
+        out[0] = 0x00;
+        outLen = 1;
+        lastBits = 4;
+        return true;
+    }
+};
+
 // CRC-16 of ISO/IEC 13239 as used by ISO/IEC 15693-3: polynomial 1021h
 // processed LSB first (8408h reflected), preset FFFFh, ones' complement of
 // the result, transmitted LSB first.
@@ -128,6 +199,7 @@ struct FakeCardV {
         }
         ++requests;
         const uint8_t flags = in[0];
+        if ((flags & 0x04) == 0) return addressed(in, len - 2, out, outLen);
         if (len != 5 || in[1] != 0x01 || (flags & 0x04) == 0 || in[2] != 0x00) return false;
         if ((flags & 0x02) == 0) return false;  // only high data rate modelled
         if ((flags & 0x20) != 0) return answer(out, outLen);
@@ -135,7 +207,76 @@ struct FakeCardV {
         return mySlot() == 0 && answer(out, outLen);
     }
 
+    // Memory: kBlocks blocks of blockSize bytes, per-block lock flag.
+    static constexpr int kBlocks = 28;
+    uint8_t blockSize = 4;
+    uint8_t blocks[kBlocks][32] = {};
+    bool locked[kBlocks] = {};
+    uint8_t infoFlags = 0x0F;  // DSFID, AFI, memory size, IC reference
+    int writes = 0;
+
 private:
+    // Addressed commands (non-inventory, flags 22h/62h). `len` without CRC.
+    bool addressed(const uint8_t* in, size_t len, uint8_t* out, size_t& outLen) {
+        const uint8_t flags = in[0];
+        // Only addressed mode at high data rate is modelled; others ignored.
+        if ((flags & 0x20) == 0 || (flags & 0x02) == 0 || (flags & 0x10) != 0 || len < 10) {
+            return false;
+        }
+        for (int i = 0; i < 8; ++i) {
+            if (in[2 + i] != uidLsb(i)) return false;  // not addressed to us
+        }
+        const bool option = (flags & 0x40) != 0;
+        size_t n = 0;
+        switch (in[1]) {
+            case 0x2B:  // GET SYSTEM INFORMATION
+                if (len != 10) return false;
+                out[n++] = 0x00;
+                out[n++] = infoFlags;
+                for (int i = 0; i < 8; ++i) out[n++] = uidLsb(i);
+                if (infoFlags & 0x01) out[n++] = dsfid;
+                if (infoFlags & 0x02) out[n++] = 0x00;
+                if (infoFlags & 0x04) {
+                    out[n++] = uint8_t(kBlocks - 1);
+                    out[n++] = uint8_t(blockSize - 1);
+                }
+                if (infoFlags & 0x08) out[n++] = 0x01;
+                break;
+            case 0x20:  // READ SINGLE BLOCK
+                if (len != 11) return false;
+                if (in[10] >= kBlocks) return error(0x10, out, outLen);  // block not available
+                out[n++] = 0x00;
+                if (option) out[n++] = locked[in[10]] ? 0x01 : 0x00;
+                for (int i = 0; i < blockSize; ++i) out[n++] = blocks[in[10]][i];
+                break;
+            case 0x21:  // WRITE SINGLE BLOCK
+                if (len != size_t(11 + blockSize) || option) return false;
+                if (in[10] >= kBlocks) return error(0x10, out, outLen);
+                if (locked[in[10]]) return error(0x12, out, outLen);  // block locked
+                std::memcpy(blocks[in[10]], &in[11], blockSize);
+                ++writes;
+                out[n++] = 0x00;
+                break;
+            default: return error(0x01, out, outLen);  // command not supported
+        }
+        return finish(out, n, outLen);
+    }
+
+    bool error(uint8_t code, uint8_t* out, size_t& outLen) {
+        out[0] = 0x01;  // error flag
+        out[1] = code;
+        return finish(out, 2, outLen);
+    }
+
+    bool finish(uint8_t* out, size_t n, size_t& outLen) {
+        uint16_t crc = crc13239(out, n);
+        if (corruptCrc) crc ^= 0x5555;
+        out[n] = uint8_t(crc);
+        out[n + 1] = uint8_t(crc >> 8);
+        outLen = n + 2;
+        return true;
+    }
+
     bool answer(uint8_t* out, size_t& outLen) {
         out[0] = 0x00;
         out[1] = dsfid;
@@ -171,6 +312,7 @@ public:
     int locks = 0;
     bool inFrame = false;
     FakeCardA* card = nullptr;  // card in the field (nullptr = none)
+    FakeT2T* t2t = nullptr;     // activated Type 2 Tag (takes precedence over `card`)
 
     Status begin() override { return Status::Ok; }
     Status beginFrame() override {
@@ -293,6 +435,10 @@ private:
             sendData15693();
             return;
         }
+        if (t2t != nullptr) {
+            sendDataT2T();
+            return;
+        }
         if (card == nullptr) return;
         size_t n = 0;
         uint32_t extra = 0;
@@ -301,6 +447,39 @@ private:
             regs[spec::reg::RX_STATUS] = static_cast<uint32_t>(n) | extra;
             regs[spec::reg::IRQ_STATUS] |= spec::irq::RX;
         }
+    }
+
+    // Type A frame on air: CRC_A appended when TX_CRC_ENABLE (DS Table 99).
+    // Receive: with RX_CRC_ENABLE (DS Table 92) the CRC is checked and
+    // removed; a frame too short to hold a CRC (4-bit ACK/NAK) then fails
+    // the check -> DATA_INTEGRITY_ERROR, as a real CRC check would.
+    void sendDataT2T() {
+        if (rfTxConfig != spec::kRfConfigIso14443a106Tx) return;
+        uint8_t air[300];
+        size_t airLen = lastCmdLen - 2;
+        std::memcpy(air, &lastCmd[2], airLen);
+        if (lastCmd[1] != 0) return;  // only whole bytes modelled
+        if ((regs[spec::reg::CRC_TX_CONFIG] & spec::kCrcTxEnable) != 0) {
+            const uint16_t c = crcA(air, airLen);
+            air[airLen++] = uint8_t(c);
+            air[airLen++] = uint8_t(c >> 8);
+        }
+        uint8_t out[64];
+        size_t n = 0;
+        uint8_t bits = 0;
+        if (!t2t->respond(air, airLen, out, n, bits)) return;
+        uint32_t st = 0;
+        if ((regs[spec::reg::CRC_RX_CONFIG] & spec::kCrcRxEnable) != 0) {
+            if (bits != 0 || n < 2 || crcA(out, n - 2) != uint16_t(out[n - 2] | (out[n - 1] << 8))) {
+                st |= spec::rxstatus::DATA_INTEGRITY_ERROR;
+            } else {
+                n -= 2;
+            }
+        }
+        std::memcpy(rfRx, out, n);
+        regs[spec::reg::RX_STATUS] = static_cast<uint32_t>(n) | st |
+                                     (uint32_t(bits) << spec::rxstatus::NUM_LAST_BITS_SHIFT);
+        regs[spec::reg::IRQ_STATUS] |= spec::irq::RX;
     }
 
     // ISO 15693 frame on air, built from TX_CONFIG / CRC_TX_CONFIG as the
@@ -331,11 +510,11 @@ private:
             }
         }
         int answers = 0;
-        uint8_t frame[16] = {};
+        uint8_t frame[64] = {};
         size_t frameLen = 0;
         for (FakeCardV* v : vcards) {
             if (v == nullptr) continue;
-            uint8_t out[16];
+            uint8_t out[64];
             size_t n = 0;
             if (v->respond(eofOnly, air, airLen, out, n)) {
                 ++answers;
