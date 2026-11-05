@@ -4,7 +4,7 @@
 // PC unit test of the portable core against a fake HAL (no hardware).
 // Build: g++ -std=c++17 -Wall -Wextra -Werror -Isrc -Itests/host tests/host/test_core.cpp
 //        src/pn5180/Transport.cpp src/pn5180/Pn5180.cpp src/pn5180/Status.cpp
-//        src/pn5180/Iso14443a.cpp
+//        src/pn5180/Iso14443a.cpp src/pn5180/Iso15693.cpp
 #include <cstdio>
 #include <cstring>
 
@@ -14,6 +14,7 @@
 
 using namespace pn5180;
 using fake::FakeCardA;
+using fake::FakeCardV;
 using fake::FakeHal;
 
 namespace {
@@ -165,6 +166,7 @@ void testIso14443a() {
         Pn5180 nfc(hal);
         Iso14443a reader(nfc);
         EXPECT(nfc.begin() == Status::Ok);
+        EXPECT(reader.fieldOn() == Status::Ok);
         CardA out;
         EXPECT(reader.activate(out) == Status::Collision);
     }
@@ -177,8 +179,166 @@ void testIso14443a() {
         Pn5180 nfc(hal);
         Iso14443a reader(nfc);
         EXPECT(nfc.begin() == Status::Ok);
+        EXPECT(reader.fieldOn() == Status::Ok);
         CardA out;
         EXPECT(reader.activate(out) == Status::IntegrityError);
+    }
+}
+
+// Card from the M2 bring-up: single-slot INVENTORY answered
+// 00 00 C7 16 95 46 2A A1 1D E0 (flags, DSFID, UID LSB first).
+void setGroundTruthUid(FakeCardV& c) {
+    const uint8_t u[8] = {0xE0, 0x1D, 0xA1, 0x2A, 0x46, 0x95, 0x16, 0xC7};
+    std::memcpy(c.uidMsbFirst, u, 8);
+}
+
+struct Rig15693 {
+    FakeHal hal;
+    Pn5180 nfc{hal};
+    Iso15693 reader{nfc};
+    Rig15693() { EXPECT(nfc.begin() == Status::Ok); }
+};
+
+void testIso15693() {
+    // CRC of ISO/IEC 13239: check value of "123456789" is 906Eh.
+    EXPECT(fake::crc13239(reinterpret_cast<const uint8_t*>("123456789"), 9) == 0x906E);
+
+    // fieldOn: LOAD_RF_CONFIG 0x0D/0x8D, field on, CRC on both ways.
+    {
+        Rig15693 r;
+        EXPECT(r.reader.fieldOn() == Status::Ok);
+        EXPECT(r.hal.rfTxConfig == 0x0D && r.hal.rfRxConfig == 0x8D);
+        EXPECT((r.hal.regs[spec::reg::RF_STATUS] & spec::rfstatus::TX_RF_STATUS) != 0);
+        EXPECT((r.hal.regs[spec::reg::CRC_TX_CONFIG] & spec::kCrcTxEnable) != 0);
+        EXPECT((r.hal.regs[spec::reg::CRC_RX_CONFIG] & spec::kCrcRxEnable) != 0);
+    }
+    // Single-slot inventory: UID MSB first, DSFID.
+    {
+        Rig15693 r;
+        FakeCardV c;
+        setGroundTruthUid(c);
+        c.dsfid = 0x5A;
+        r.hal.vcards[0] = &c;
+        EXPECT(r.reader.fieldOn() == Status::Ok);
+        CardV out;
+        EXPECT(r.reader.inventory(out) == Status::Ok);
+        EXPECT(std::memcmp(out.uid, c.uidMsbFirst, 8) == 0);
+        EXPECT(out.uid[0] == 0xE0 && out.uid[7] == 0xC7);
+        EXPECT(out.dsfid == 0x5A);
+        // Field off -> no answer.
+        EXPECT(r.reader.fieldOff() == Status::Ok);
+        EXPECT(r.reader.inventory(out) == Status::NoResponse);
+        EXPECT(r.hal.locks == 0);
+    }
+    // Regressions the fake must catch: TX CRC off -> card ignores the frame;
+    // RX CRC off -> CRC left in the buffer -> CardError; 14443 config loaded
+    // -> nothing; bad CRC from the card -> IntegrityError.
+    {
+        Rig15693 r;
+        FakeCardV c;
+        r.hal.vcards[0] = &c;
+        EXPECT(r.reader.fieldOn() == Status::Ok);
+        CardV out;
+        EXPECT(r.nfc.setCrc(false, true) == Status::Ok);
+        EXPECT(r.reader.inventory(out) == Status::NoResponse);
+        EXPECT(c.requests == 0);
+        EXPECT(r.nfc.setCrc(true, false) == Status::Ok);
+        EXPECT(r.reader.inventory(out) == Status::CardError);
+        EXPECT(r.nfc.setCrc(true, true) == Status::Ok);
+        c.corruptCrc = true;
+        EXPECT(r.reader.inventory(out) == Status::IntegrityError);
+        c.corruptCrc = false;
+        EXPECT(r.reader.inventory(out) == Status::Ok);
+        // Frame without SOF (start symbol cleared) is ignored by cards.
+        r.hal.regs[spec::reg::TX_CONFIG] &= ~spec::txconfig::START_SYMBOL_MASK;
+        EXPECT(r.reader.inventory(out) == Status::NoResponse);
+        Iso14443a a(r.nfc);
+        EXPECT(a.fieldOn() == Status::Ok);
+        EXPECT(r.reader.inventory(out) == Status::NoResponse);
+    }
+    // Two cards in single-slot mode -> Collision.
+    {
+        Rig15693 r;
+        FakeCardV c1;
+        FakeCardV c2;
+        setGroundTruthUid(c2);
+        r.hal.vcards[0] = &c1;
+        r.hal.vcards[1] = &c2;
+        EXPECT(r.reader.fieldOn() == Status::Ok);
+        CardV out;
+        EXPECT(r.reader.inventory(out) == Status::Collision);
+    }
+    // 16 slots: cards in slots 7 and 8 read; TX_CONFIG restored; 15 EOFs.
+    {
+        Rig15693 r;
+        FakeCardV c1;  // ...78 -> slot 8
+        FakeCardV c2;  // ...C7 -> slot 7
+        setGroundTruthUid(c2);
+        r.hal.vcards[0] = &c1;
+        r.hal.vcards[1] = &c2;
+        EXPECT(r.reader.fieldOn() == Status::Ok);
+        const uint32_t txBefore = r.hal.regs[spec::reg::TX_CONFIG];
+        InventoryResult res;
+        EXPECT(r.reader.inventory16(res) == Status::Ok);
+        EXPECT(res.count == 2);
+        EXPECT(res.collisionSlots == 0);
+        EXPECT(std::memcmp(res.cards[0].uid, c2.uidMsbFirst, 8) == 0);  // slot 7 first
+        EXPECT(std::memcmp(res.cards[1].uid, c1.uidMsbFirst, 8) == 0);
+        EXPECT(r.hal.eofFrames == 15);
+        EXPECT(r.hal.regs[spec::reg::TX_CONFIG] == txBefore);
+        // A plain request works again afterwards (SOF + data restored).
+        CardV out;
+        r.hal.vcards[1] = nullptr;
+        EXPECT(r.reader.inventory(out) == Status::Ok);
+    }
+    // 16 slots with two cards in slot 7 and one in slot 8.
+    {
+        Rig15693 r;
+        FakeCardV a;
+        FakeCardV b;
+        FakeCardV c;  // slot 8
+        setGroundTruthUid(a);
+        setGroundTruthUid(b);
+        b.uidMsbFirst[7] = 0x97;  // also slot 7
+        r.hal.vcards[0] = &a;
+        r.hal.vcards[1] = &b;
+        r.hal.vcards[2] = &c;
+        EXPECT(r.reader.fieldOn() == Status::Ok);
+        InventoryResult res;
+        EXPECT(r.reader.inventory16(res) == Status::Ok);
+        EXPECT(res.count == 1);
+        EXPECT(res.collisionSlots == 0x0080);  // slot 7
+        EXPECT(std::memcmp(res.cards[0].uid, c.uidMsbFirst, 8) == 0);
+        // Without the slot-8 card: nothing clean -> Collision.
+        r.hal.vcards[2] = nullptr;
+        EXPECT(r.reader.inventory16(res) == Status::Collision);
+        EXPECT(res.count == 0 && res.collisionSlots == 0x0080);
+    }
+    // 16 slots, no card -> NoResponse; field off -> NoResponse.
+    {
+        Rig15693 r;
+        EXPECT(r.reader.fieldOn() == Status::Ok);
+        const uint32_t txBefore = r.hal.regs[spec::reg::TX_CONFIG];
+        InventoryResult res;
+        EXPECT(r.reader.inventory16(res) == Status::NoResponse);
+        EXPECT(r.hal.regs[spec::reg::TX_CONFIG] == txBefore);
+        FakeCardV c;
+        r.hal.vcards[0] = &c;
+        EXPECT(r.reader.fieldOff() == Status::Ok);
+        EXPECT(r.reader.inventory16(res) == Status::NoResponse);
+    }
+    // Device error in the middle of the slots: TX_CONFIG still restored.
+    {
+        Rig15693 r;
+        FakeCardV c;  // slot 8
+        r.hal.vcards[0] = &c;
+        EXPECT(r.reader.fieldOn() == Status::Ok);
+        const uint32_t txBefore = r.hal.regs[spec::reg::TX_CONFIG];
+        r.hal.errorAtSendData = 3;  // GENERAL_ERROR on the 3rd SEND_DATA
+        InventoryResult res;
+        EXPECT(r.reader.inventory16(res) == Status::ChipError);
+        EXPECT(r.hal.regs[spec::reg::TX_CONFIG] == txBefore);
+        EXPECT(r.hal.locks == 0);
     }
 }
 
@@ -205,6 +365,7 @@ int main() {
     testRecoveryPolicy();
     testCore();
     testIso14443a();
+    testIso15693();
     if (failures == 0) {
         std::printf("all tests passed\n");
         return 0;

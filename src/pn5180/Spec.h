@@ -192,6 +192,25 @@ constexpr uint32_t kRxGainIso14443a106 = 0x2u;
 // bits 15:12, = 3).                                          DS Table 172, Table 102
 constexpr uint32_t kSigproRmConfigIso14443a106 = 0x430DCu;
 
+// LOAD_RF_CONFIG indexes for ISO/IEC 15693 ASK100, 26 kbit/s.  DS Table 32; AN12650 4.2.3 line 1
+constexpr uint8_t kRfConfigIso15693Ask100Tx = 0x0D;
+constexpr uint8_t kRfConfigIso15693Ask100Rx = 0x8D;
+
+// TX_CONFIG fields.                                          DS Table 98
+namespace txconfig {
+constexpr uint32_t START_SYMBOL_MASK = 0x3u << 6;  // bits 7:6 TX_START_SYMBOL
+constexpr uint32_t STOP_SYMBOL_MASK = 0x3u << 8;   // bits 9:8 TX_STOP_SYMBOL
+constexpr uint32_t DATA_ENABLE = 1u << 10;         // bit 10 TX_DATA_ENABLE
+// AND mask that leaves only the stop symbol (EOF) to be sent by a
+// zero-length SEND_DATA: clears TX_START_SYMBOL and TX_DATA_ENABLE.
+// Equals AN12650's 0xFFFFFB3F.                               AN12650 4.2.3 line 11; DS Table 15
+constexpr uint32_t kEofOnlyAndMask = ~(START_SYMBOL_MASK | DATA_ENABLE);
+}  // namespace txconfig
+
+// ISO/IEC 15693 card -> reader bit duration at 26.48 kbit/s (single
+// subcarrier, Manchester): 37.76 us.                         DS Table 65
+constexpr uint32_t kIso15693BitNs = 37760u;
+
 // --------------------------------------------------------------------------
 // IRQ_STATUS bits (DS Table 77). IRQ_CLEAR (DS Table 78) and IRQ_ENABLE
 // (DS Table 76) use the same bit positions.

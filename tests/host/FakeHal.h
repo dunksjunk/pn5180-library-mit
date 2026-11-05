@@ -10,6 +10,7 @@
 
 #include "pn5180/Hal.h"
 #include "pn5180/Iso14443a.h"
+#include "pn5180/Iso15693.h"
 #include "pn5180/Spec.h"
 
 namespace fake {
@@ -87,8 +88,79 @@ private:
     }
 };
 
+// CRC-16 of ISO/IEC 13239 as used by ISO/IEC 15693-3: polynomial 1021h
+// processed LSB first (8408h reflected), preset FFFFh, ones' complement of
+// the result, transmitted LSB first.
+inline uint16_t crc13239(const uint8_t* p, size_t n) {
+    uint16_t crc = 0xFFFF;
+    for (size_t i = 0; i < n; ++i) {
+        crc ^= p[i];
+        for (int b = 0; b < 8; ++b) crc = (crc & 1) ? uint16_t((crc >> 1) ^ 0x8408) : uint16_t(crc >> 1);
+    }
+    return uint16_t(~crc);
+}
+
+// Simulated ISO/IEC 15693 card. Frames arrive as they are on air (with CRC);
+// the card checks the CRC and answers INVENTORY only.
+struct FakeCardV {
+    uint8_t uidMsbFirst[8] = {0xE0, 0x04, 0x01, 0x50, 0x12, 0x34, 0x56, 0x78};
+    uint8_t dsfid = 0x00;
+    bool corruptCrc = false;  // answer with a bad CRC
+    int slot = -1;            // current slot of a 16-slot inventory, -1 = none
+    int requests = 0;         // valid (CRC-correct) requests seen
+
+    uint8_t uidLsb(int i) const { return uidMsbFirst[7 - i]; }
+    // Mask length 0: the slot number is the UID's least significant nibble.
+    int mySlot() const { return uidLsb(0) & 0x0F; }
+
+    // `eofOnly`: an EOF without SOF/data (next slot). Returns true and the
+    // on-air answer (with CRC) if the card answers.
+    bool respond(bool eofOnly, const uint8_t* in, size_t len, uint8_t* out, size_t& outLen) {
+        outLen = 0;
+        if (eofOnly) {
+            if (slot < 0 || slot >= 15) return false;
+            ++slot;
+            return slot == mySlot() && answer(out, outLen);
+        }
+        slot = -1;
+        if (len < 2 + 2 || crc13239(in, len - 2) != uint16_t(in[len - 2] | (in[len - 1] << 8))) {
+            return false;  // no/invalid CRC: a card ignores the frame
+        }
+        ++requests;
+        const uint8_t flags = in[0];
+        if (len != 5 || in[1] != 0x01 || (flags & 0x04) == 0 || in[2] != 0x00) return false;
+        if ((flags & 0x02) == 0) return false;  // only high data rate modelled
+        if ((flags & 0x20) != 0) return answer(out, outLen);
+        slot = 0;
+        return mySlot() == 0 && answer(out, outLen);
+    }
+
+private:
+    bool answer(uint8_t* out, size_t& outLen) {
+        out[0] = 0x00;
+        out[1] = dsfid;
+        for (int i = 0; i < 8; ++i) out[2 + i] = uidLsb(i);
+        uint16_t crc = crc13239(out, 10);
+        if (corruptCrc) crc ^= 0x5555;
+        out[10] = uint8_t(crc);
+        out[11] = uint8_t(crc >> 8);
+        outLen = 12;
+        return true;
+    }
+};
+
 class FakeHal : public Hal {
 public:
+    // TX_CONFIG value the fake loads with LOAD_RF_CONFIG 0x0D: data enabled,
+    // start symbol and stop symbol set (fake value, the DS does not list it).
+    static constexpr uint32_t kTxConfig15693 =
+        spec::txconfig::DATA_ENABLE | (1u << 6) | (1u << 8);
+    FakeCardV* vcards[4] = {};  // ISO 15693 cards in the field
+    uint8_t rfTxConfig = 0xFF;   // last LOAD_RF_CONFIG
+    uint8_t rfRxConfig = 0xFF;
+    int eofFrames = 0;           // EOF-only frames sent
+    int errorAtSendData = 0;     // n > 0: GENERAL_ERROR on the n-th SEND_DATA
+
     uint32_t regs[0x44] = {};
     uint8_t eeprom[256] = {};
     uint8_t lastCmd[300] = {};
@@ -177,12 +249,20 @@ private:
                 std::memcpy(&eeprom[lastCmd[1]], &lastCmd[2], lastCmdLen - 2);
                 break;
             case spec::cmd::SEND_DATA: sendData(); break;
+            case spec::cmd::LOAD_RF_CONFIG:  // DS Table 31
+                if (lastCmd[1] != spec::kRfConfigUnchanged) rfTxConfig = lastCmd[1];
+                if (lastCmd[2] != spec::kRfConfigUnchanged) rfRxConfig = lastCmd[2];
+                if (lastCmd[1] == spec::kRfConfigIso15693Ask100Tx) regs[spec::reg::TX_CONFIG] = kTxConfig15693;
+                break;
             case spec::cmd::RF_ON:  // DS Table 37, Table 103
                 regs[spec::reg::RF_STATUS] |= spec::rfstatus::TX_RF_STATUS;
                 regs[spec::reg::IRQ_STATUS] |= spec::irq::TX_RFON;
                 break;
             case spec::cmd::RF_OFF:  // DS Table 38, Table 103
                 regs[spec::reg::RF_STATUS] &= ~spec::rfstatus::TX_RF_STATUS;
+                for (FakeCardV* vc : vcards) {
+                    if (vc != nullptr) vc->slot = -1;
+                }
                 break;
             case spec::cmd::READ_DATA:
                 std::memcpy(rsp, rfRx, sizeof(rfRx));
@@ -193,10 +273,24 @@ private:
     }
 
     void sendData() {
+        if (errorAtSendData > 0 && --errorAtSendData == 0) {
+            regs[spec::reg::IRQ_STATUS] |= spec::irq::GENERAL_ERROR;  // DS 11.4.1
+            return;
+        }
         // DS Table 15 condition: Transceive command must be set.
         if ((regs[spec::reg::SYSTEM_CONFIG] & spec::kSystemConfigCommandMask) !=
             spec::kCommandTransceive) {
             regs[spec::reg::IRQ_STATUS] |= spec::irq::GENERAL_ERROR;
+            return;
+        }
+        if ((regs[spec::reg::RF_STATUS] & spec::rfstatus::TX_RF_STATUS) == 0) {
+            for (FakeCardV* v : vcards) {
+                if (v != nullptr) v->slot = -1;  // unpowered cards lose their state
+            }
+            return;  // no field: nobody answers
+        }
+        if (rfTxConfig == spec::kRfConfigIso15693Ask100Tx) {
+            sendData15693();
             return;
         }
         if (card == nullptr) return;
@@ -207,6 +301,62 @@ private:
             regs[spec::reg::RX_STATUS] = static_cast<uint32_t>(n) | extra;
             regs[spec::reg::IRQ_STATUS] |= spec::irq::RX;
         }
+    }
+
+    // ISO 15693 frame on air, built from TX_CONFIG / CRC_TX_CONFIG as the
+    // chip would (DS Table 98, Table 99); answers combined like the receiver.
+    void sendData15693() {
+        if (rfRxConfig != spec::kRfConfigIso15693Ask100Rx) return;  // receiver deaf for 15693
+        const uint32_t txc = regs[spec::reg::TX_CONFIG];
+        const size_t len = lastCmdLen - 2;
+        const bool dataOn = (txc & spec::txconfig::DATA_ENABLE) != 0;
+        const bool sof = (txc & spec::txconfig::START_SYMBOL_MASK) != 0;
+        const bool eof = (txc & spec::txconfig::STOP_SYMBOL_MASK) != 0;
+        bool eofOnly = false;
+        uint8_t air[300];
+        size_t airLen = 0;
+        if (!dataOn) {
+            // Symbols only. A valid "next slot" is a bare EOF: no SOF, no data.
+            if (len != 0 || sof || !eof) return;
+            eofOnly = true;
+            ++eofFrames;
+        } else {
+            if (!sof || !eof || len == 0) return;  // malformed frame, cards ignore it
+            std::memcpy(air, &lastCmd[2], len);
+            airLen = len;
+            if ((regs[spec::reg::CRC_TX_CONFIG] & spec::kCrcTxEnable) != 0) {
+                const uint16_t crc = crc13239(air, airLen);
+                air[airLen++] = uint8_t(crc);
+                air[airLen++] = uint8_t(crc >> 8);
+            }
+        }
+        int answers = 0;
+        uint8_t frame[16] = {};
+        size_t frameLen = 0;
+        for (FakeCardV* v : vcards) {
+            if (v == nullptr) continue;
+            uint8_t out[16];
+            size_t n = 0;
+            if (v->respond(eofOnly, air, airLen, out, n)) {
+                ++answers;
+                for (size_t i = 0; i < n; ++i) frame[i] |= out[i];  // superposition
+                frameLen = n;
+            }
+        }
+        if (answers == 0) return;
+        uint32_t st = 0;
+        size_t n = frameLen;
+        if (answers > 1) {
+            st |= spec::rxstatus::COLLISION_DETECTED;
+        } else if ((regs[spec::reg::CRC_RX_CONFIG] & spec::kCrcRxEnable) != 0) {
+            if (crc13239(frame, n - 2) != uint16_t(frame[n - 2] | (frame[n - 1] << 8))) {
+                st |= spec::rxstatus::DATA_INTEGRITY_ERROR;
+            }
+            n -= 2;  // CRC checked and removed
+        }
+        std::memcpy(rfRx, frame, frameLen);
+        regs[spec::reg::RX_STATUS] = static_cast<uint32_t>(n) | st;
+        regs[spec::reg::IRQ_STATUS] |= spec::irq::RX;
     }
 };
 
