@@ -23,11 +23,19 @@
 //       ISO15693 NDEF SKIP not formatted uid E0 ...
 //     or "... NDEF FAIL <step>: <Status> ...".
 // A card without a Capability Container is never formatted by this demo.
+//
+// WARNING: this sketch WRITES to the tags in the field. The original content
+// is restored, but use it at your own risk - no warranty, see LICENSE.
 
 #include <SPI.h>
 
 #include <PN5180.h>
 #include <PN5180ArduinoHal.h>
+
+// Declared at global scope on purpose: PlatformIO's .ino converter would
+// otherwise generate these prototypes inside the anonymous namespace below.
+void setup();
+void loop();
 
 namespace {
 
@@ -74,6 +82,11 @@ struct Seen {
     uint8_t misses = 0;
     bool present = false;
 };
+// Defined further down; declared here because PlatformIO's .ino converter
+// inserts its generated prototypes (e.g. printUidEnd(const Card&)) before the
+// first function of the sketch.
+struct Card;
+
 constexpr size_t MAX_CARDS_A = 4;  // Type A cards handled per poll
 Seen seenA[MAX_CARDS_A];
 Seen seenV[pn5180::iso15693::kSlots];

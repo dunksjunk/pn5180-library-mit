@@ -12,6 +12,7 @@ claude-code.log
 # Arduino & ESP-IDF / PlatformIO Build Artifacts
 # ==========================================
 # Heavy build directories and compiled binaries
+# (build/ also covers the Doxygen output in build/docs and the host tests in build/host)
 build/
 .pio/
 .pioenvs/

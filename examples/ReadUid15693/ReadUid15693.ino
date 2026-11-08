@@ -20,6 +20,11 @@
 #include <PN5180.h>
 #include <PN5180ArduinoHal.h>
 
+// Declared at global scope on purpose: PlatformIO's .ino converter would
+// otherwise generate these prototypes inside the anonymous namespace below.
+void setup();
+void loop();
+
 namespace {
 
 constexpr int8_t PIN_SCK = 18;

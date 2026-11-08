@@ -45,105 +45,119 @@ constexpr size_t kMaxUnitBytes = 32;  // biggest ISO/IEC 15693 block
 constexpr size_t kMaxReserved = 4;    // Lock/Memory Control TLVs remembered
 }  // namespace tlv
 
-// The data area of one card as an array of equal read/write units (T2T: a
-// 4-byte page, ISO/IEC 15693: a block). Addresses are absolute byte
-// addresses in the card memory: unit u covers [u * unitSize(), (u+1) * unitSize()).
+/// The data area of one card as an array of equal read/write units (T2T: a
+/// 4-byte page, ISO/IEC 15693: a block). Addresses are absolute byte
+/// addresses in the card memory: unit u covers the bytes from
+/// u * unitSize() up to, not including, (u + 1) * unitSize().
 class NdefMemory {
 public:
-    virtual size_t unitSize() const = 0;   // 1..tlv::kMaxUnitBytes, 0 = no valid CC
-    virtual size_t areaStart() const = 0;  // first byte of the TLV area (after the CC)
-    virtual size_t areaEnd() const = 0;    // one past the last byte of the TLV area
-    virtual bool readOnly() const = 0;     // the CC refuses writes
+    /// Bytes per unit, 1..32; 0 = no valid CC.
+    virtual size_t unitSize() const = 0;
+    /// First byte of the TLV area (after the CC).
+    virtual size_t areaStart() const = 0;
+    /// One past the last byte of the TLV area.
+    virtual size_t areaEnd() const = 0;
+    /// Whether the CC refuses writes.
+    virtual bool readOnly() const = 0;
+    /// Reads unit @p unit (unitSize() bytes) into @p out.
     virtual Status readUnit(size_t unit, uint8_t* out) = 0;
+    /// Writes unit @p unit (unitSize() bytes) from @p in.
     virtual Status writeUnit(size_t unit, const uint8_t* in) = 0;
 
 protected:
     ~NdefMemory() = default;
 };
 
-// Result of scanning the TLV area.
+/// Result of scanNdefTlv().
 struct NdefTlvScan {
+    /// A byte range in the card memory.
     struct Range {
-        size_t start = 0;  // absolute byte address
-        size_t end = 0;    // exclusive
+        size_t start = 0;  ///< absolute byte address
+        size_t end = 0;    ///< exclusive
     };
-    bool found = false;     // NDEF Message TLV present
-    size_t tlvStart = 0;    // its T byte; if !found: where a new one would go
-    size_t valueStart = 0;  // first byte of the message (found only)
-    size_t length = 0;      // message length (found only)
-    // Areas declared by Lock/Memory Control TLVs before the NDEF TLV; NDEF
-    // data must not be stored there.        T2T (Lock Control TLV, Memory Control TLV)
+    bool found = false;     ///< NDEF Message TLV present
+    size_t tlvStart = 0;    ///< its T byte; if !found: where a new one would go
+    size_t valueStart = 0;  ///< first byte of the message (found only)
+    size_t length = 0;      ///< message length (found only)
+    /// Areas declared by Lock/Memory Control TLVs before the NDEF TLV; NDEF
+    /// data must not be stored there.        T2T (Lock Control TLV, Memory Control TLV)
     Range reserved[tlv::kMaxReserved];
-    size_t reservedCount = 0;
+    size_t reservedCount = 0;  ///< valid entries in reserved[]
 };
 
-// Walks the TLVs from areaStart(): NULL TLVs and Lock/Memory Control and
-// proprietary TLVs are skipped, the scan stops at the first NDEF Message TLV
-// or at a Terminator TLV / the end of the area.
-//   Ok             `scan` filled (found or not)
-//   NotFormatted   the memory has no valid data area (unitSize() 0 or area empty)
-//   MalformedData  a TLV length runs past the area, or a control TLV has a
-//                  value length other than 3
-//   Unsupported    more than tlv::kMaxReserved control TLVs
-//   other          read error of the card
+/// Walks the TLVs from areaStart(): NULL TLVs and Lock/Memory Control and
+/// proprietary TLVs are skipped, the scan stops at the first NDEF Message TLV
+/// or at a Terminator TLV / the end of the area.
+/// @return
+/// - Ok: @p scan filled (found or not)
+/// - NotFormatted: the memory has no valid data area (unitSize() 0 or area empty)
+/// - MalformedData: a TLV length runs past the area, or a control TLV has a
+///   value length other than 3
+/// - Unsupported: more than 4 control TLVs (tlv::kMaxReserved)
+/// - other: read error of the card
 Status scanNdefTlv(NdefMemory& mem, NdefTlvScan& scan);
 
-// Copies the NDEF message (V of the first NDEF Message TLV) into `buf`.
-// `len` = message length; 0 if there is no NDEF TLV or it is empty.
-//   BufferTooSmall `len` is set to the needed size, nothing copied
-//   Unsupported    the message overlaps a reserved (lock/memory control) area
-//   + the results of scanNdefTlv()
+/// Copies the NDEF message (V of the first NDEF Message TLV) into @p buf.
+/// @p len = message length; 0 if there is no NDEF TLV or it is empty.
+/// @return BufferTooSmall (@p len is set to the needed size, nothing
+/// copied), Unsupported (the message overlaps a reserved lock/memory control
+/// area), or the results of scanNdefTlv().
 Status readNdefMessage(NdefMemory& mem, uint8_t* buf, size_t capacity, size_t& len);
 
-// Where a message of `msgLength` bytes would be written: at the existing NDEF
-// Message TLV, else after the last TLV before the Terminator. A Terminator
-// TLV follows the message if a byte is left in the area.
+/// Where a message of `msgLength` bytes would be written: at the existing NDEF
+/// Message TLV, else after the last TLV before the Terminator. A Terminator
+/// TLV follows the message if a byte is left in the area.
 struct NdefWritePlan {
-    size_t tlvStart = 0;      // T byte of the NDEF Message TLV
-    size_t headerBytes = 0;   // T + L: 2 (L <= FEh) or 4 (3-byte L)
-    size_t msgLength = 0;
-    bool terminator = false;  // a Terminator TLV is written after the message
-    size_t firstUnit = 0;     // first and last unit written (inclusive)
-    size_t lastUnit = 0;
+    size_t tlvStart = 0;      ///< T byte of the NDEF Message TLV
+    size_t headerBytes = 0;   ///< T + L: 2 (1-byte L up to FEh) or 4 (3-byte L)
+    size_t msgLength = 0;     ///< message bytes (V)
+    bool terminator = false;  ///< a Terminator TLV is written after the message
+    size_t firstUnit = 0;     ///< first unit written
+    size_t lastUnit = 0;      ///< last unit written (inclusive)
+    /// One past the last byte written.
     size_t end() const { return tlvStart + headerBytes + msgLength + (terminator ? 1u : 0u); }
 };
-//   ReadOnly       the CC marks the area read-only
-//   BufferTooSmall the TLV does not fit into the area (or msgLength > FFFEh)
-//   Unsupported    the TLV would overlap a reserved area, or would have to
-//                  rewrite a unit that also holds the CC
-//   + the results of scanNdefTlv()
+
+/// Plans a write of a message of @p msgLength bytes (see NdefWritePlan).
+/// @return ReadOnly (the CC marks the area read-only), BufferTooSmall (the
+/// TLV does not fit into the area, or msgLength > FFFEh), Unsupported (the
+/// TLV would overlap a reserved area, or would have to rewrite a unit that
+/// also holds the CC), or the results of scanNdefTlv().
 Status planNdefWrite(NdefMemory& mem, size_t msgLength, NdefWritePlan& plan);
 
-// Writes `msg` (may be empty: an empty NDEF TLV) per planNdefWrite(). Order,
-// so that an interrupted write leaves a valid TLV area:
-//   1. the unit(s) holding T and L, with L = 00h (an empty NDEF Message TLV),
-//   2. the remaining units (message, Terminator),
-//   3. the unit(s) holding T and L again, now with the real length.
-// T2T (NDEF write procedure), T5T (NDEF write procedure). Units only partly
-// covered are read first and their other bytes written back unchanged.
-// The message content itself is not checked (see validateNdefMessage()).
+/// Writes @p msg (may be empty: an empty NDEF TLV) per planNdefWrite(). Order,
+/// so that an interrupted write leaves a valid TLV area:
+///   1. the unit(s) holding T and L, with L = 00h (an empty NDEF Message TLV),
+///   2. the remaining units (message, Terminator),
+///   3. the unit(s) holding T and L again, now with the real length.
+///
+/// T2T (NDEF write procedure), T5T (NDEF write procedure). Units only partly
+/// covered are read first and their other bytes written back unchanged.
+/// The message content itself is not checked (see validateNdefMessage()).
 Status writeNdefMessage(NdefMemory& mem, const uint8_t* msg, size_t len);
 
-// Copy of the units a write per `plan` touches.
+/// Copy of the units a write per an NdefWritePlan touches.
 struct NdefBackup {
-    static constexpr size_t kMaxBytes = 512;  // host limit
-    bool valid = false;
-    size_t firstUnit = 0;
-    size_t units = 0;
-    size_t unitSize = 0;
-    size_t tlvStart = 0;
-    uint8_t data[kMaxBytes] = {};
+    static constexpr size_t kMaxBytes = 512;  ///< host limit
+    bool valid = false;       ///< backup complete
+    size_t firstUnit = 0;     ///< first unit saved
+    size_t units = 0;         ///< number of units saved
+    size_t unitSize = 0;      ///< bytes per unit
+    size_t tlvStart = 0;      ///< T byte of the planned NDEF Message TLV
+    uint8_t data[kMaxBytes] = {};  ///< saved unit contents
 };
-//   BufferTooSmall the units do not fit into NdefBackup::kMaxBytes
-//   other          read error (backup.valid stays false)
+
+/// Saves the units @p plan touches into @p backup.
+/// @return BufferTooSmall (the units do not fit into NdefBackup::kMaxBytes)
+/// or a read error (backup.valid stays false).
 Status backupNdefArea(NdefMemory& mem, const NdefWritePlan& plan, NdefBackup& backup);
 
-// Writes the backed-up units back (first the T/L unit(s) as an empty NDEF
-// Message TLV, then the other units, then the T/L unit(s) from the backup,
-// mirroring writeNdefMessage()) and reads every unit back.
-//   CardError      a unit read back differs from the backup
-//   InvalidArgument backup not valid / from another memory geometry
-//   other          write or read error
+/// Writes the backed-up units back (first the T/L unit(s) as an empty NDEF
+/// Message TLV, then the other units, then the T/L unit(s) from the backup,
+/// mirroring writeNdefMessage()) and reads every unit back.
+/// @return CardError (a unit read back differs from the backup),
+/// InvalidArgument (backup not valid / from another memory geometry), or a
+/// write or read error.
 Status restoreNdefArea(NdefMemory& mem, const NdefBackup& backup);
 
 }  // namespace pn5180

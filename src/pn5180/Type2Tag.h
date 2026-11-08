@@ -57,61 +57,69 @@ constexpr uint32_t kReadTimeoutMs = 5;
 constexpr uint32_t kWriteTimeoutMs = 20;
 }  // namespace t2t
 
-// Decoded Capability Container (page 3).            T2T (Capability Container)
+/// Decoded Capability Container (page 3).            T2T (Capability Container)
 struct T2tCapability {
-    uint8_t raw[4] = {};       // CC0..CC3 as read
-    uint8_t version = 0;       // CC1: mapping version (major b7..b4, minor b3..b0)
-    uint16_t dataBytes = 0;    // CC2 * 8: size of the data area in bytes
-    uint8_t firstPage = t2t::kFirstDataPage;
-    uint8_t lastPage = 0;      // last page of the data area (inclusive)
-    bool readOnly = true;      // CC3 write access != 0h
-    bool readable = false;     // CC3 read access == 0h
+    uint8_t raw[4] = {};       ///< CC0..CC3 as read
+    uint8_t version = 0;       ///< CC1: mapping version (major b7..b4, minor b3..b0)
+    uint16_t dataBytes = 0;    ///< CC2 * 8: size of the data area in bytes
+    uint8_t firstPage = t2t::kFirstDataPage;  ///< first page of the data area (4)
+    uint8_t lastPage = 0;      ///< last page of the data area (inclusive)
+    bool readOnly = true;      ///< CC3 write access != 0h
+    bool readable = false;     ///< CC3 read access == 0h
 };
 
-// One object per activated card: it caches that card's Capability Container.
-// Not thread-safe; shares the single-owner rule of Pn5180 (see Pn5180.h).
+/// NFC Forum Type 2 Tag on an activated ISO/IEC 14443A card: READ, WRITE
+/// (limited to the data area the CC declares) and the NDEF mapping.
+///
+/// One object per activated card: it caches that card's Capability Container.
+/// Not thread-safe; shares the single-owner rule of Pn5180 (see Pn5180.h).
 class Type2Tag {
 public:
+    /// @param nfc driver; the card must already be activated (Iso14443a)
     explicit Type2Tag(Pn5180& nfc) : nfc_(nfc) {}
-    Type2Tag(const Type2Tag&) = delete;  // ndefMemory() refers to this object
+    /// Not copyable: ndefMemory() refers to this object.
+    Type2Tag(const Type2Tag&) = delete;
+    /// Not copyable: ndefMemory() refers to this object.
     Type2Tag& operator=(const Type2Tag&) = delete;
 
-    // READ 30h: 16 bytes from `page` onward (4 pages), CRC_A on both
-    // directions (the PN5180 checks and strips it, DS Tables 92, 99).
-    //   Ok, NoResponse, IntegrityError (CRC/parity), CardError (NAK or wrong
-    //   length), or a device error.
+    /// READ 30h: 16 bytes from @p page onward (4 pages), CRC_A on both
+    /// directions (the PN5180 checks and strips it, DS Tables 92, 99).
+    /// @return Ok, NoResponse, IntegrityError (CRC/parity), CardError (NAK or
+    /// wrong length), or a device error.
     Status read(uint8_t page, uint8_t out[t2t::kReadBytes]);
 
-    // Reads and decodes the Capability Container; caches it for write().
-    //   NotFormatted if CC0 is not E1h or CC2 is 0 (no NDEF-formatted T2T).
+    /// Reads and decodes the Capability Container; caches it for write().
+    /// NotFormatted if CC0 is not E1h or CC2 is 0 (no NDEF-formatted T2T).
     Status capability(T2tCapability& cc);
 
     // ---- NDEF (NFC Forum Type 2 Tag NDEF mapping) ----
-    // Both read the CC first if needed (capability()).
-    //   NotFormatted   no valid CC
-    //   Unsupported    CC major version > 1 or read access not granted
-    //   + readNdefMessage() / writeNdefMessage() results (NdefTlv.h);
-    //   writeNdef: ReadOnly when CC3 refuses writes. Pages 0-3 are never written.
-    // readNdef: `len` = message length, 0 if the tag holds no NDEF message.
+
+    /// Reads the NDEF message into @p buf; @p len = message length, 0 if the
+    /// tag holds no NDEF message. Reads the CC first if needed (capability()).
+    /// NotFormatted: no valid CC; Unsupported: CC major version > 1 or read
+    /// access not granted; otherwise the readNdefMessage() results (NdefTlv.h).
     Status readNdef(uint8_t* buf, size_t capacity, size_t& len);
+    /// Writes @p msg as the NDEF message (writeNdefMessage(), NdefTlv.h).
+    /// Same CC checks as readNdef(); ReadOnly when CC3 refuses writes.
+    /// Pages 0-3 are never written.
     Status writeNdef(const uint8_t* msg, size_t len);
 
-    // The data area (pages 4 .. lastPage) as NdefMemory, for planNdefWrite()
-    // / backupNdefArea() / restoreNdefArea(). Empty (unitSize() 0) until
-    // capability() succeeded. Reads go through a 4-page cache that is
-    // dropped by every write and by readNdef()/writeNdef().
+    /// The data area (pages 4 .. lastPage) as NdefMemory, for planNdefWrite()
+    /// / backupNdefArea() / restoreNdefArea(). Empty (unitSize() 0) until
+    /// capability() succeeded. Reads go through a 4-page cache that is
+    /// dropped by every write and by readNdef()/writeNdef().
     NdefMemory& ndefMemory() { return mem_; }
 
-    // WRITE A2h: 4 bytes into `page`. Allowed only inside the data area that
-    // the CC declares (reads the CC first if needed):
-    //   InvalidArgument  page outside the data area (pages 0..3 never written)
-    //   ReadOnly         the CC marks the tag read-only
-    // The ACK/NAK is a 4-bit frame without CRC, so CRC checking on receive is
-    // switched off for this exchange and CRC_RX_CONFIG is restored to its
-    // previous value on every path (DS Table 92). NAK -> CardError.
+    /// WRITE A2h: 4 bytes into @p page. Allowed only inside the data area that
+    /// the CC declares (reads the CC first if needed):
+    /// InvalidArgument for a page outside the data area (pages 0..3 are never
+    /// written), ReadOnly if the CC marks the tag read-only.
+    /// The ACK/NAK is a 4-bit frame without CRC, so CRC checking on receive is
+    /// switched off for this exchange and CRC_RX_CONFIG is restored to its
+    /// previous value on every path (DS Table 92). NAK -> CardError.
     Status write(uint8_t page, const uint8_t in[t2t::kPageBytes]);
 
-    // ACK/NAK nibble of the last WRITE answer (0xFF if none).
+    /// ACK/NAK nibble of the last WRITE answer (0xFF if none).
     uint8_t lastAckNak() const { return lastAckNak_; }
 
 private:

@@ -20,22 +20,29 @@
 
 namespace pn5180 {
 
+/// GPIO numbers of the PN5180 connection for ArduinoHal.
 struct ArduinoPins {
-    int8_t sck;
-    int8_t miso;
-    int8_t mosi;
-    int8_t nss;   // plain GPIO driven by the HAL, never claimed by SPI.begin()
-    int8_t busy;
-    int8_t rst;
-    int8_t irq;   // -1 when not connected; callers then poll IRQ_STATUS
+    int8_t sck;   ///< SPI clock
+    int8_t miso;  ///< SPI data PN5180 -> host
+    int8_t mosi;  ///< SPI data host -> PN5180
+    int8_t nss;   ///< chip select: plain GPIO driven by the HAL, never claimed by SPI.begin()
+    int8_t busy;  ///< BUSY input
+    int8_t rst;   ///< RESET_N output
+    int8_t irq;   ///< IRQ input; -1 when not connected: callers then poll IRQ_STATUS
 };
 
+/// pn5180::Hal for Arduino-ESP32: an SPIClass bus plus GPIOs, and a FreeRTOS
+/// mutex for lock()/unlock() on ESP_PLATFORM.
 class ArduinoHal : public Hal {
 public:
-    // Host-side default SPI clock; must not exceed spec::kSpiMaxClockHz
-    // (7 Mbit/s, DS 11.4.1). 1 MHz is a conservative choice for jumper wires.
+    /// Host-side default SPI clock; must not exceed spec::kSpiMaxClockHz
+    /// (7 Mbit/s, DS 11.4.1). 1 MHz is a conservative choice for jumper wires.
     static constexpr uint32_t kDefaultSpiClockHz = 1000000u;
 
+    /// @param spi        SPI bus (e.g. `SPI`); begun by begin() with the given
+    ///                   SCK/MISO/MOSI pins and without claiming SS
+    /// @param pins       pin map
+    /// @param spiClockHz SPI clock, at most 7 MHz (DS 11.4.1)
     ArduinoHal(SPIClass& spi, const ArduinoPins& pins, uint32_t spiClockHz = kDefaultSpiClockHz)
         : spi_(spi), pins_(pins), clockHz_(spiClockHz) {}
 

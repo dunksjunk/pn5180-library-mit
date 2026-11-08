@@ -1,0 +1,72 @@
+{
+  "name": "PN5180-MIT",
+  "version": "0.1.0",
+  "description": "Clean-room MIT-licensed driver for the NXP PN5180 NFC frontend: ISO/IEC 14443A (anticollision, enumerate) and ISO/IEC 15693 UIDs, NFC Forum Type 2 / Type 5 tag memory, NDEF, IRQ pin and low-power card detection (LPCD). Portable C++17 core with a small HAL.",
+  "keywords": "nfc, rfid, pn5180, iso14443, iso15693, ndef, nxp",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dunksjunk/pn5180-library-mit"
+  },
+  "homepage": "https://github.com/dunksjunk/pn5180-library-mit",
+  "authors": [
+    {
+      "name": "Rich Dunkel",
+      "maintainer": true
+    }
+  ],
+  "license": "MIT",
+  "frameworks": "arduino",
+  "platforms": "espressif32",
+  "headers": "PN5180.h",
+  "export": {
+    "include": [
+      "src",
+      "examples",
+      "library.json",
+      "library.properties",
+      "LICENSE",
+      "README.md"
+    ],
+    "exclude": [
+      "tests",
+      "tools",
+      ".autodev",
+      ".github",
+      "build",
+      "examples/*/build",
+      "examples/*/.pio"
+    ]
+  },
+  "examples": [
+    {
+      "name": "Basic",
+      "base": "examples/Basic",
+      "files": ["Basic.ino"]
+    },
+    {
+      "name": "ReadUid",
+      "base": "examples/ReadUid",
+      "files": ["ReadUid.ino"]
+    },
+    {
+      "name": "ReadUid15693",
+      "base": "examples/ReadUid15693",
+      "files": ["ReadUid15693.ino"]
+    },
+    {
+      "name": "MemoryTest",
+      "base": "examples/MemoryTest",
+      "files": ["MemoryTest.ino"]
+    },
+    {
+      "name": "NdefDemo",
+      "base": "examples/NdefDemo",
+      "files": ["NdefDemo.ino"]
+    },
+    {
+      "name": "LowPowerDetect",
+      "base": "examples/LowPowerDetect",
+      "files": ["LowPowerDetect.ino"]
+    }
+  ]
+}

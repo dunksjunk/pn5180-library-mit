@@ -20,11 +20,12 @@
 
 namespace pn5180 {
 
+/// An ISO/IEC 15693 card (VICC) found by an inventory.
 struct CardV {
-    // UID, most significant byte first: uid[0] is the E0h prefix, uid[1] the
-    // IC manufacturer code. On air the UID is sent LSB first.  ISO/IEC 15693-3 (UID)
+    /// UID, most significant byte first: uid[0] is the E0h prefix, uid[1] the
+    /// IC manufacturer code. On air the UID is sent LSB first.  ISO/IEC 15693-3 (UID)
     uint8_t uid[8] = {};
-    uint8_t dsfid = 0;  // data storage format identifier    ISO/IEC 15693-3 (DSFID)
+    uint8_t dsfid = 0;  ///< data storage format identifier    ISO/IEC 15693-3 (DSFID)
 };
 
 namespace iso15693 {
@@ -126,57 +127,64 @@ constexpr uint32_t kWriteBlockTimeoutMs =
     exchangeTimeoutMs(kAddressedHeaderBytes + 1 + kMaxBlockBytes, 2, kWriteMaxNs);
 }  // namespace iso15693
 
-// GET SYSTEM INFORMATION answer.                  ISO/IEC 15693-3 (get system information)
+/// GET SYSTEM INFORMATION answer.                  ISO/IEC 15693-3 (get system information)
 struct SystemInfo15693 {
-    uint8_t infoFlags = 0;    // iso15693::INFO_*: which fields below are valid
-    uint8_t uid[8] = {};      // MSB first, as CardV
-    uint8_t dsfid = 0;
-    uint8_t afi = 0;
-    uint16_t blockCount = 0;  // number of blocks (0 if INFO_MEMORY_SIZE absent)
-    uint8_t blockSize = 0;    // bytes per block (0 if INFO_MEMORY_SIZE absent)
-    uint8_t icReference = 0;
+    uint8_t infoFlags = 0;    ///< iso15693::INFO_*: which fields below are valid
+    uint8_t uid[8] = {};      ///< MSB first, as CardV
+    uint8_t dsfid = 0;        ///< data storage format identifier
+    uint8_t afi = 0;          ///< application family identifier
+    uint16_t blockCount = 0;  ///< number of blocks (0 if INFO_MEMORY_SIZE absent)
+    uint8_t blockSize = 0;    ///< bytes per block (0 if INFO_MEMORY_SIZE absent)
+    uint8_t icReference = 0;  ///< IC reference
 };
 
+/// Result of Iso15693::inventory16().
 struct InventoryResult {
-    CardV cards[iso15693::kSlots];
-    uint8_t count = 0;            // valid entries in cards[]
-    uint16_t collisionSlots = 0;  // bit n: slot n had an unusable (garbled) answer
+    CardV cards[iso15693::kSlots];  ///< cards found (one per slot at most)
+    uint8_t count = 0;            ///< valid entries in cards[]
+    uint16_t collisionSlots = 0;  ///< bit n: slot n had an unusable (garbled) answer
 };
 
-// Not thread-safe; shares the single-owner rule of Pn5180 (see Pn5180.h).
+/// ISO/IEC 15693 reader: field control, 1- and 16-slot INVENTORY and the
+/// addressed memory commands.
+///
+/// Not thread-safe; shares the single-owner rule of Pn5180 (see Pn5180.h).
 class Iso15693 {
 public:
+    /// @param nfc driver; must outlive this object
     explicit Iso15693(Pn5180& nfc) : nfc_(nfc) {}
 
-    // Host-side receive timeout per slot (default iso15693::kSlotTimeoutMs).
+    /// Host-side receive timeout per slot (default iso15693::kSlotTimeoutMs, 8 ms).
     void setResponseTimeoutMs(uint32_t ms) { timeoutMs_ = ms; }
 
-    // LOAD_RF_CONFIG 0x0D/0x8D (ISO 15693 ASK100, 26 kbit/s; DS Table 32,
-    // AN12650 4.2.3 line 1), RF_ON and wait for the field (DS Table 37,
-    // Table 103), CRC on in both directions (DS Tables 92, 99), then wait
-    // `guardMs` of unmodulated field so cards can power up.
+    /// LOAD_RF_CONFIG 0x0D/0x8D (ISO 15693 ASK100, 26 kbit/s; DS Table 32,
+    /// AN12650 4.2.3 line 1), RF_ON and wait for the field (DS Table 37,
+    /// Table 103), CRC on in both directions (DS Tables 92, 99), then wait
+    /// @p guardMs of unmodulated field so cards can power up.
     Status fieldOn(uint32_t guardMs = 5);
 
-    // RF_OFF (DS Table 38; AN12650 4.2.1 line 16).
+    /// RF_OFF (DS Table 38; AN12650 4.2.1 line 16).
     Status fieldOff();
 
-    // Single-slot INVENTORY (flags 26h, mask length 0).
-    //   Ok             card filled in
-    //   NoResponse     no card answered
-    //   Collision      several cards answered at once (PN5180 RX_STATUS)
-    //   IntegrityError CRC error / ProtocolError framing error (RX_STATUS);
-    //                  with several cards in the field this is a collision too
-    //   CardError      error flag set or wrong length / UID prefix
+    /// Single-slot INVENTORY (flags 26h, mask length 0).
+    /// @return
+    /// - Ok: card filled in
+    /// - NoResponse: no card answered
+    /// - Collision: several cards answered at once (PN5180 RX_STATUS)
+    /// - IntegrityError (CRC error) / ProtocolError (framing error, RX_STATUS);
+    ///   with several cards in the field this is a collision too
+    /// - CardError: error flag set or wrong length / UID prefix
     Status inventory(CardV& card);
 
-    // 16-slot INVENTORY (flags 06h, mask length 0) as in AN12650 4.2: the
-    // request opens slot 0, an EOF-only frame (TX_CONFIG with TX_DATA_ENABLE
-    // and the start symbol cleared, DS Table 98) opens each of slots 1..15.
-    // TX_CONFIG is restored on every path.
-    //   Ok         at least one card read (result.collisionSlots may be != 0)
-    //   Collision  no card read cleanly, but some slots had garbled answers
-    //   NoResponse no answer in any slot
-    //   other      device error; the inventory was aborted
+    /// 16-slot INVENTORY (flags 06h, mask length 0) as in AN12650 4.2: the
+    /// request opens slot 0, an EOF-only frame (TX_CONFIG with TX_DATA_ENABLE
+    /// and the start symbol cleared, DS Table 98) opens each of slots 1..15.
+    /// TX_CONFIG is restored on every path.
+    /// @return
+    /// - Ok: at least one card read (result.collisionSlots may be != 0)
+    /// - Collision: no card read cleanly, but some slots had garbled answers
+    /// - NoResponse: no answer in any slot
+    /// - other: device error; the inventory was aborted
     Status inventory16(InventoryResult& result);
 
     // ---- Addressed memory commands (flags 22h + UID, LSB first on air) ----
@@ -186,23 +194,27 @@ public:
     //   NoResponse no answer (wrong UID, card gone)
     // The field must be on (fieldOn()); each command uses its own timeout.
 
-    // GET SYSTEM INFORMATION 2Bh. The UID in the answer must match `uid`.
+    /// GET SYSTEM INFORMATION 2Bh. The UID in the answer must match @p uid
+    /// (MSB first, CardV::uid). CardError if the card set the error flag
+    /// (see lastErrorCode()) or answered malformed, NoResponse if no answer.
     Status getSystemInfo(const uint8_t uid[iso15693::kUidBytes], SystemInfo15693& info);
 
-    // READ SINGLE BLOCK 20h. `blockSize` = bytes per block (1..32, e.g. from
-    // getSystemInfo); the answer must be exactly that long. With
-    // `withSecurity` the option flag is set and the block security status
-    // byte is stored in `security` (required then, may be nullptr otherwise).
+    /// READ SINGLE BLOCK 20h. @p blockSize = bytes per block (1..32, e.g. from
+    /// getSystemInfo); the answer must be exactly that long. With
+    /// @p withSecurity the option flag is set and the block security status
+    /// byte is stored in @p security (required then, may be nullptr otherwise).
+    /// Errors as for getSystemInfo().
     Status readBlock(const uint8_t uid[iso15693::kUidBytes], uint8_t block, uint8_t* out,
                      size_t blockSize, bool withSecurity = false, uint8_t* security = nullptr);
 
-    // WRITE SINGLE BLOCK 21h, option flag 0: the card answers after
-    // programming (timeout iso15693::kWriteBlockTimeoutMs).
+    /// WRITE SINGLE BLOCK 21h, option flag 0: the card answers after
+    /// programming (timeout iso15693::kWriteBlockTimeoutMs). Errors as for
+    /// getSystemInfo().
     Status writeBlock(const uint8_t uid[iso15693::kUidBytes], uint8_t block, const uint8_t* data,
                       size_t blockSize);
 
-    // ISO/IEC 15693-3 error code of the last addressed command that came
-    // back with the error flag; 0 after a command without a card error.
+    /// ISO/IEC 15693-3 error code of the last addressed command that came
+    /// back with the error flag; 0 after a command without a card error.
     uint8_t lastErrorCode() const { return lastErrorCode_; }
 
 private:

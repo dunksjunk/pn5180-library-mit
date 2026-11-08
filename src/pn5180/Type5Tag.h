@@ -41,50 +41,57 @@ constexpr size_t kCcLongBytes = 8;
 constexpr size_t kMaxBlocks1Byte = 256;
 }  // namespace t5t
 
-// Decoded Capability Container.                      T5T (Capability Container)
+/// Decoded Capability Container.                      T5T (Capability Container)
 struct T5tCapability {
-    uint8_t raw[t5t::kCcLongBytes] = {};  // first 8 bytes of the card (CC0..CC7 if 8-byte CC)
-    uint8_t ccBytes = 0;                  // 4 or 8
-    uint8_t versionMajor = 0;
-    uint8_t versionMinor = 0;
-    uint8_t readAccess = 0;               // CC1 b3..b2
-    uint8_t writeAccess = 0;              // CC1 b1..b0
-    uint8_t features = 0;                 // CC3
-    uint32_t mlenBytes = 0;               // MLEN * 8
-    // TLV area actually used: from ccBytes to min(ccBytes + MLEN * 8, the
-    // memory size from GET SYSTEM INFORMATION, limited to 256 blocks).
+    uint8_t raw[t5t::kCcLongBytes] = {};  ///< first 8 bytes of the card (CC0..CC7 if 8-byte CC)
+    uint8_t ccBytes = 0;                  ///< 4 or 8
+    uint8_t versionMajor = 0;             ///< CC1 b7..b6
+    uint8_t versionMinor = 0;             ///< CC1 b5..b4
+    uint8_t readAccess = 0;               ///< CC1 b3..b2
+    uint8_t writeAccess = 0;              ///< CC1 b1..b0
+    uint8_t features = 0;                 ///< CC3
+    uint32_t mlenBytes = 0;               ///< MLEN * 8
+    /// Start of the TLV area actually used: from ccBytes to min(ccBytes +
+    /// MLEN * 8, the memory size from GET SYSTEM INFORMATION, limited to 256
+    /// blocks).
     uint32_t areaStart = 0;
-    uint32_t areaEnd = 0;
-    bool readOnly = true;                 // write access != 00b
+    uint32_t areaEnd = 0;                 ///< end (exclusive) of the TLV area, see areaStart
+    bool readOnly = true;                 ///< write access != 00b
 };
 
-// One object per card (UID) per session. Not thread-safe; shares the
-// single-owner rule of Pn5180 (see Pn5180.h).
+/// NFC Forum Type 5 Tag (ISO/IEC 15693 card): Capability Container and the
+/// NDEF mapping.
+///
+/// One object per card (UID) per session. Not thread-safe; shares the
+/// single-owner rule of Pn5180 (see Pn5180.h).
 class Type5Tag {
 public:
-    // `uid` (MSB first, as CardV::uid) must stay valid while the object is used.
+    /// @p uid (MSB first, as CardV::uid) must stay valid while the object is used.
     Type5Tag(Iso15693& reader, const uint8_t uid[iso15693::kUidBytes])
         : reader_(reader), uid_(uid) {}
-    Type5Tag(const Type5Tag&) = delete;  // ndefMemory() refers to this object
+    /// Not copyable: ndefMemory() refers to this object.
+    Type5Tag(const Type5Tag&) = delete;
+    /// Not copyable: ndefMemory() refers to this object.
     Type5Tag& operator=(const Type5Tag&) = delete;
 
-    // GET SYSTEM INFORMATION (once) and the CC from the first blocks.
-    //   Ok            `cc` filled and cached
-    //   Unsupported   no memory size in the system information, block size
-    //                 above 32, mapping major version != 1 or read access
-    //                 not granted
-    //   NotFormatted  no E1h/E2h magic, or MLEN 0
-    //   + Iso15693 command results (NoResponse, CardError, ...)
+    /// GET SYSTEM INFORMATION (once) and the CC from the first blocks.
+    /// @return
+    /// - Ok: @p cc filled and cached
+    /// - Unsupported: no memory size in the system information, block size
+    ///   above 32, mapping major version != 1 or read access not granted
+    /// - NotFormatted: no E1h/E2h magic, or MLEN 0
+    /// - Iso15693 command results (NoResponse, CardError, ...)
     Status capability(T5tCapability& cc);
 
-    // System information as read by capability().
+    /// System information as read by capability().
     const SystemInfo15693& systemInfo() const { return info_; }
 
-    // As Type2Tag::readNdef() / writeNdef(); the CC block(s) are never written.
+    /// As Type2Tag::readNdef().
     Status readNdef(uint8_t* buf, size_t capacity, size_t& len);
+    /// As Type2Tag::writeNdef(); the CC block(s) are never written.
     Status writeNdef(const uint8_t* msg, size_t len);
 
-    // The T5T area as NdefMemory (unit = block). Empty until capability() succeeded.
+    /// The T5T area as NdefMemory (unit = block). Empty until capability() succeeded.
     NdefMemory& ndefMemory() { return mem_; }
 
 private:

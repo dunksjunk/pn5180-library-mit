@@ -81,9 +81,17 @@ CLAUDE_ALLOWED_TOOLS = [
     "Bash(arduino-cli compile:*)",
     "Bash(arduino-cli upload -p COM6:*)",  # test bed; user-approved for this project
     "Bash(cppcheck:*)",
+    "Bash(doxygen:*)",                     # API docs build; user-approved
+    "Bash(python -m platformio ci:*)",     # PlatformIO example builds only; user-approved
     "Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)",
 ]
 CLAUDE_DISALLOWED_TOOLS = ["WebFetch", "WebSearch", "Agent"]
+
+# winget's Doxygen installer adds its bin dir to PATH only for new shells; make
+# `doxygen` resolvable for the gates and the author (who inherits this env).
+DOXYGEN_DIR = Path(r"C:\Program Files\doxygen\bin")
+if not shutil.which("doxygen") and (DOXYGEN_DIR / "doxygen.exe").exists():
+    os.environ["PATH"] = str(DOXYGEN_DIR) + os.pathsep + os.environ.get("PATH", "")
 
 SYSTEM_PROMPT = """\
 You are the author in an automated closed-loop harness building a PN5180 NFC

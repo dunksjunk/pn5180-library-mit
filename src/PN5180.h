@@ -18,3 +18,12 @@
 #include "pn5180/Transport.h"
 #include "pn5180/Type2Tag.h"
 #include "pn5180/Type5Tag.h"
+
+/// @namespace pn5180
+/// @brief PN5180-MIT: portable driver core (no Arduino.h, no OS headers) and
+/// the platform HALs.
+///
+/// Start with pn5180::Pn5180 (chip commands) on a pn5180::Hal implementation
+/// such as pn5180::ArduinoHal, then use pn5180::Iso14443a or
+/// pn5180::Iso15693 to talk to cards. Every operation returns a
+/// pn5180::Status.

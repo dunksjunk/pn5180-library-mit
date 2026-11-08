@@ -1,0 +1,72 @@
+# SPDX-License-Identifier: MIT
+# Doxygen configuration for the PN5180-MIT API docs: `doxygen Doxyfile`
+# Output: build/docs/html (build/ is gitignored). Warnings are errors.
+# Only options that exist in Doxygen 1.9.x and later are used (CI runs the
+# Ubuntu package, locally 1.18).
+
+PROJECT_NAME           = "PN5180-MIT"
+PROJECT_NUMBER         = 0.1.0
+PROJECT_BRIEF          = "Clean-room MIT driver for the NXP PN5180 NFC frontend"
+OUTPUT_DIRECTORY       = build/docs
+CREATE_SUBDIRS         = NO
+FULL_PATH_NAMES        = YES
+STRIP_FROM_PATH        = src
+STRIP_FROM_INC_PATH    = src
+JAVADOC_AUTOBRIEF      = YES
+MARKDOWN_SUPPORT       = YES
+BUILTIN_STL_SUPPORT    = YES
+
+# The public API is everything declared in the installed headers. Internal
+# helpers live in namespace pn5180::detail or inside \cond INTERNAL blocks.
+EXTRACT_ALL            = NO
+EXTRACT_PRIVATE        = NO
+EXTRACT_STATIC         = NO
+EXTRACT_LOCAL_CLASSES  = NO
+EXTRACT_ANON_NSPACES   = NO
+HIDE_UNDOC_MEMBERS     = NO
+HIDE_UNDOC_CLASSES     = NO
+HIDE_IN_BODY_DOCS      = YES
+INTERNAL_DOCS          = NO
+CASE_SENSE_NAMES       = YES
+SORT_MEMBER_DOCS       = NO
+
+QUIET                  = YES
+WARNINGS               = YES
+WARN_IF_UNDOCUMENTED   = YES
+WARN_IF_DOC_ERROR      = YES
+WARN_NO_PARAMDOC       = NO
+# Report every warning, then fail (Doxygen >= 1.9.0).
+WARN_AS_ERROR          = FAIL_ON_WARNINGS
+
+INPUT                  = README.md src
+FILE_PATTERNS          = *.h *.md
+RECURSIVE              = YES
+# Internal: chip register map / command codes (Spec.h, every value cites the
+# data sheet in the source), the raw host-interface Transport, and the
+# card-protocol constant namespaces (cite ISO/IEC in the source).
+EXCLUDE                = src/pn5180/Spec.h src/pn5180/Transport.h
+EXCLUDE_SYMBOLS        = detail detail::* pn5180::detail pn5180::detail::* \
+                         spec spec::* pn5180::spec pn5180::spec::* \
+                         iso14443a iso14443a::* pn5180::iso14443a pn5180::iso14443a::* \
+                         iso15693 iso15693::* pn5180::iso15693 pn5180::iso15693::* \
+                         t2t t2t::* pn5180::t2t pn5180::t2t::* \
+                         t5t t5t::* pn5180::t5t pn5180::t5t::* \
+                         tlv tlv::* pn5180::tlv pn5180::tlv::* \
+                         ndef ndef::* pn5180::ndef pn5180::ndef::* \
+                         Transport pn5180::Transport
+USE_MDFILE_AS_MAINPAGE = README.md
+EXAMPLE_PATH           = examples
+EXAMPLE_RECURSIVE      = YES
+
+# The Arduino HAL is compiled only when ARDUINO is defined: document it.
+ENABLE_PREPROCESSING   = YES
+MACRO_EXPANSION        = NO
+PREDEFINED             = ARDUINO
+
+SOURCE_BROWSER         = NO
+VERBATIM_HEADERS       = YES
+GENERATE_HTML          = YES
+HTML_OUTPUT            = html
+GENERATE_LATEX         = NO
+GENERATE_TREEVIEW      = YES
+HAVE_DOT               = NO

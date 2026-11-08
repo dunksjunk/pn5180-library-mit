@@ -3,8 +3,78 @@
 A driver for the NXP **PN5180** NFC frontend, written from scratch from NXP's
 published documentation and released under the **MIT license**.
 
-> **Status: pre-alpha.** Nothing here is usable yet. The API will change without
-> notice until the first tagged release.
+> **Status: 0.1.0.** Tested on ESP32 (Arduino-ESP32) on the reference test
+> bed below; it also builds for ESP32-S3 and ESP32-C3. Raspberry Pi (Linux) support is
+> still planned. The API may still change before 1.0.
+
+## Features
+
+| Area | What works | Notes / measured limits |
+|---|---|---|
+| ISO/IEC 14443A | REQA/WUPA, anticollision over cascade levels 1..3, SELECT, HLTA; `enumerate()` lists every card in the field; `activateUid()` re-selects a known card; bounded retry | read range about 45 mm with the antenna of the generic PN5180 module |
+| ISO/IEC 15693 | 1- and 16-slot INVENTORY, GET SYSTEM INFORMATION, READ/WRITE SINGLE BLOCK | |
+| Tag memory | NFC Forum Type 2 Tag pages (writes limited to the data area the CC declares), ISO/IEC 15693 blocks; non-destructive `runMemTest()` | |
+| NDEF | parser and builder (URI, Text, generic records), NDEF TLV read/write on Type 2 and Type 5 Tags, backup/restore of the touched area | chunked records are not supported; cards are never formatted |
+| IRQ pin | optional; `transceive()` waits on the pin instead of polling `IRQ_STATUS`; pin self-test | without a pin everything works by polling |
+| LPCD | low-power card detection, EEPROM settings written only where they differ | needs the IRQ pin; detects a *change* of antenna load, not a card that was already there when LPCD was armed |
+
+Every operation returns a `pn5180::Status`; `requiresRecovery(status)` says
+when the chip should be hard-reset before continuing.
+
+## Installation
+
+**Arduino IDE / arduino-cli:** download the repository as a ZIP and use
+*Sketch > Include Library > Add .ZIP Library...*, or clone it into your
+libraries folder:
+
+```sh
+cd ~/Arduino/libraries        # Windows: Documents\Arduino\libraries
+git clone https://github.com/dunksjunk/pn5180-library-mit.git
+```
+
+**PlatformIO:** add the Git URL to `lib_deps` in `platformio.ini`:
+
+```ini
+[env:esp32dev]
+platform = espressif32
+board = esp32dev
+framework = arduino
+lib_deps = https://github.com/dunksjunk/pn5180-library-mit.git
+```
+
+## Quick start
+
+Prints the UID of an ISO/IEC 14443A card (full version with error recovery:
+`examples/ReadUid`).
+
+```cpp
+#include <SPI.h>
+#include <PN5180.h>
+#include <PN5180ArduinoHal.h>
+
+//                               SCK MISO MOSI NSS BUSY RST IRQ(-1 = none)
+const pn5180::ArduinoPins pins = {18, 19,  23,  16, 5,   17, -1};
+pn5180::ArduinoHal hal(SPI, pins);
+pn5180::Pn5180 nfc(hal);
+pn5180::Iso14443a reader(nfc);
+
+void setup() {
+    Serial.begin(115200);
+    pn5180::Status s = nfc.begin();
+    if (pn5180::ok(s)) s = nfc.hardReset();
+    if (!pn5180::ok(s)) Serial.println(pn5180::statusToString(s));
+}
+
+void loop() {
+    pn5180::CardA card;
+    if (pn5180::ok(reader.fieldOn()) && pn5180::ok(reader.activate(card))) {
+        for (uint8_t i = 0; i < card.uidLen; ++i) Serial.printf("%02X ", card.uid[i]);
+        Serial.println();
+    }
+    reader.fieldOff();
+    delay(500);
+}
+```
 
 ## Why another PN5180 library?
 
@@ -34,7 +104,7 @@ derived from LGPL- or GPL-licensed PN5180 code cannot be accepted.
 
 | Priority | Platform | Interface | Status |
 |---|---|---|---|
-| 1 | ESP32 family (ESP32, ESP32-S3, ESP32-C3, ...) via Arduino-ESP32 | SPI + GPIO | in development |
+| 1 | ESP32 family (ESP32, ESP32-S3, ESP32-C3, ...) via Arduino-ESP32 | SPI + GPIO | 0.1.0: tested on ESP32, builds for S3/C3 |
 | 2 | Raspberry Pi (Linux), starting with the Pi Zero 2 W | `spidev` + GPIO character device | planned |
 
 The protocol logic is plain, portable C++ with no dependency on `Arduino.h`.
@@ -89,7 +159,28 @@ The examples default to this pin map. Every pin can be changed.
 | `examples/NdefDemo/` | prints the NDEF message of Type 2 / Type 5 Tags, writes and verifies a test message, restores the original |
 | `tests/host/` | PC unit test of the core against a fake HAL |
 
-Host test: `g++ -std=c++17 -Wall -Wextra -Werror -Isrc tests/host/test_core.cpp src/pn5180/*.cpp && ./a.out`
+## Host unit tests
+
+The portable core is tested on a PC against a fake HAL (no hardware needed):
+
+```sh
+g++ -std=c++17 -Wall -Wextra -Werror -Isrc tests/host/test_core.cpp src/pn5180/*.cpp -o test_core
+./test_core
+```
+
+CI (`.github/workflows/ci.yml`) runs them with g++ and clang++, and once more
+with `-fsanitize=address,undefined`.
+
+## API documentation
+
+```sh
+doxygen Doxyfile        # output: build/docs/html/index.html
+```
+
+The build must be warning-free (CI fails otherwise and uploads the HTML as
+the `api-docs` artifact). `Spec.h` (register map and command codes, each
+citing the data sheet) and `Transport.h` (raw host interface) are internal
+and not part of the generated docs.
 
 ## Several ISO/IEC 14443A cards
 
@@ -178,10 +269,18 @@ tasks must never drive the same chip at the same time. If several tasks need
 the reader, hold your own mutex around each complete operation (field on ...
 field off).
 
-## Installation
+## Release checklist
 
-Not yet published. Once the library is usable it will be installable from the
-Arduino Library Manager and PlatformIO, and as a CMake project for Linux.
+1. Bump `version` in **both** `library.properties` and `library.json` (and
+   `PROJECT_NUMBER` in `Doxyfile`); `python tools/check_manifests.py` must
+   pass.
+2. All local gates green: examples compile warning-free for ESP32, ESP32-S3
+   and ESP32-C3 (arduino-cli and `pio ci --lib .`), hardware tests on the
+   reference test bed.
+3. CI green on the release commit (host tests, sanitizers, manifests, docs).
+4. Tag `vX.Y.Z` on that commit and push the tag.
+5. Create the GitHub release from the tag, with the changes since the last
+   release.
 
 ## Development
 
@@ -203,7 +302,21 @@ The NXP PDFs are not redistributed in this repository. Download them from
 
 ## License
 
-[MIT](LICENSE) © 2026 Rich Dunkel
+[MIT](https://github.com/dunksjunk/pn5180-library-mit/blob/main/LICENSE) © 2026 Rich Dunkel
 
-PN5180 is a product of NXP Semiconductors. This project is independent and is
-not affiliated with or endorsed by NXP.
+## Disclaimer
+
+This software is provided "as is", without warranty of any kind, express or
+implied, including but not limited to the warranties of merchantability,
+fitness for a particular purpose and non-infringement. In no event shall the
+authors or copyright holders be liable for any claim, damages or other
+liability, whether in an action of contract, tort or otherwise, arising from,
+out of or in connection with the software or the use or other dealings in the
+software (see the MIT license in `LICENSE`).
+
+The `MemoryTest` and `NdefDemo` examples write to the tags in the field. They
+restore the original content, but use them at your own risk and not on tags
+you cannot afford to lose.
+
+This project is independent and is not affiliated with or endorsed by NXP.
+PN5180 is a product of NXP Semiconductors.

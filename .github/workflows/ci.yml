@@ -1,0 +1,79 @@
+# SPDX-License-Identifier: MIT
+# Host-side CI: unit tests of the portable core (g++ and clang++), the same
+# tests under AddressSanitizer + UndefinedBehaviorSanitizer, the manifest
+# consistency check and the Doxygen API docs. Arduino / PlatformIO builds and
+# the hardware-in-the-loop tests run locally, not here.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  host-tests:
+    name: host tests (${{ matrix.cxx }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cxx: [g++, clang++]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+      - name: Build
+        run: |
+          mkdir -p build/host
+          ${{ matrix.cxx }} --version
+          ${{ matrix.cxx }} -std=c++17 -Wall -Wextra -Werror -Isrc \
+            tests/host/test_core.cpp src/pn5180/*.cpp -o build/host/test_core
+      - name: Run
+        run: ./build/host/test_core
+
+  sanitizers:
+    name: host tests (ASan + UBSan)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+      - name: Build
+        run: |
+          mkdir -p build/host
+          clang++ -std=c++17 -Wall -Wextra -Werror -g -O1 -fno-omit-frame-pointer \
+            -fsanitize=address,undefined -fno-sanitize-recover=all -Isrc \
+            tests/host/test_core.cpp src/pn5180/*.cpp -o build/host/test_core_san
+      - name: Run
+        env:
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1:strict_string_checks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: ./build/host/test_core_san
+
+  manifests:
+    name: manifest check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: "3.12"
+      - name: library.properties vs library.json
+        run: python tools/check_manifests.py
+
+  docs:
+    name: API docs (Doxygen)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+      - name: Install Doxygen
+        run: sudo apt-get update && sudo apt-get install -y doxygen
+      - name: Build docs (warnings are errors)
+        run: |
+          doxygen --version
+          mkdir -p build/docs  # Doxygen does not create missing parent dirs
+          doxygen Doxyfile
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: api-docs
+          path: build/docs/html
+          if-no-files-found: error

@@ -27,11 +27,19 @@
 // (Type2Tag enforces the CC data area). Device/transport errors (and a
 // failed RF off) trigger a hardware reset; a failed start-up is retried
 // every 5 s.
+//
+// WARNING: this sketch WRITES to the tags in the field. The original content
+// is restored, but use it at your own risk - no warranty, see LICENSE.
 
 #include <SPI.h>
 
 #include <PN5180.h>
 #include <PN5180ArduinoHal.h>
+
+// Declared at global scope on purpose: PlatformIO's .ino converter would
+// otherwise generate these prototypes inside the anonymous namespace below.
+void setup();
+void loop();
 
 namespace {
 
@@ -252,11 +260,41 @@ bool fieldOffBetweenPolls() {
 }
 
 // ---- Type 2 Tag ----
+// Transient RF errors: no answer, or a garbled frame (a collision flag on a
+// frame from the one selected card is noise as well).
+bool transientRf(pn5180::Status s) {
+    return s == pn5180::Status::NoResponse || s == pn5180::Status::Collision ||
+           s == pn5180::Status::IntegrityError || s == pn5180::Status::ProtocolError ||
+           s == pn5180::Status::CardError;
+}
+
+// Runs `step`; after a transient RF error the card is re-activated and the
+// step repeated, at most READ_ATTEMPTS times in total. A PICC that received
+// an erroneous frame leaves ACTIVE (to IDLE, or HALT if woken from HALT),
+// so a repeat needs WUPA + SELECT first.  ISO/IEC 14443-3 6.3
+constexpr int READ_ATTEMPTS = 3;
+template <typename F>
+pn5180::Status withReactivation(const pn5180::CardA& card, F step) {
+    pn5180::Status s = step();
+    for (int i = 1; i < READ_ATTEMPTS && transientRf(s); ++i) {
+        pn5180::CardA active;
+        const pn5180::Status a = activateKnown(card, active);
+        if (pn5180::requiresRecovery(a)) {
+            return a;
+        }
+        if (pn5180::ok(a)) {
+            s = step();
+        }
+    }
+    return s;
+}
+
 // Returns false if a device error requires a reset.
 bool testT2t(const pn5180::CardA& card) {
     pn5180::Type2Tag tag(nfc);
     uint8_t buf[pn5180::t2t::kReadBytes] = {};
-    pn5180::Status s = tag.read(0, buf);  // pages 0-3: UID, lock bytes, CC
+    // pages 0-3: UID, lock bytes, CC
+    pn5180::Status s = withReactivation(card, [&] { return tag.read(0, buf); });
     if (!pn5180::ok(s)) {
         Serial.print("T2T MEMTEST FAIL dump: ");
         Serial.println(pn5180::statusToString(s));
@@ -267,7 +305,7 @@ bool testT2t(const pn5180::CardA& card) {
     Serial.println();
 
     pn5180::T2tCapability cc;
-    s = tag.capability(cc);
+    s = withReactivation(card, [&] { return tag.capability(cc); });
     if (s == pn5180::Status::NotFormatted) {
         // No valid CC: the user area is unknown, so nothing is written.
         Serial.print("T2T MEMTEST SKIP no valid capability container, uid");

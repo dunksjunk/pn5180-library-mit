@@ -42,69 +42,80 @@
 
 namespace pn5180 {
 
-// Source of the LPCD reference value: EEPROM 0x38 bits 1:0.  DS Table 73
+/// Source of the LPCD reference value: EEPROM 0x38 bits 1:0.  DS Table 73
 enum class LpcdCalibration : uint8_t {
-    Auto = 0,  // 00b: calibrate once with the gear in LPCD_REFERENCE_VALUE
-    Self = 1,  // 01b: use gear/AGC from register AGC_REF_CONFIG (DS Table 112)
+    Auto = 0,  ///< 00b: calibrate once with the gear in LPCD_REFERENCE_VALUE
+    Self = 1,  ///< 01b: use gear/AGC from register AGC_REF_CONFIG (DS Table 112)
 };
 
+/// LPCD configuration stored in the PN5180 EEPROM (Lpcd::configure()).
 struct LpcdSettings {
-    // EEPROM 0x37: wake when (reference AGC - actual AGC) > threshold.  DS Table 73
+    /// EEPROM 0x37: wake when (reference AGC - actual AGC) > threshold.  DS Table 73
     uint8_t threshold = 0;
-    // EEPROM 0x36: RF-on time before the AGC measurement, unit 8 us.     DS Table 73
+    /// EEPROM 0x36: RF-on time before the AGC measurement, unit 8 us.     DS Table 73
     uint8_t fieldOnTime = 0;
-    // EEPROM 0x38 bits 1:0.                                               DS Table 73
+    /// EEPROM 0x38 bits 1:0.                                               DS Table 73
     LpcdCalibration calibration = LpcdCalibration::Auto;
-    // EEPROM 0x34 bits 3:0: AGC gear for auto calibration (0..15).        DS Table 51, 73
+    /// EEPROM 0x34 bits 3:0: AGC gear for auto calibration (0..15).        DS Table 51, 73
     uint8_t gear = 0;
 };
 
+/// Why Lpcd::waitForWake() returned.
 enum class LpcdWakeReason : uint8_t {
-    CardDetected,  // LPCD_IRQ set                              DS Table 77 bit 19
-    Other,         // the pin fired without LPCD_IRQ (see irqStatus)
+    CardDetected,  ///< LPCD_IRQ set                              DS Table 77 bit 19
+    Other,         ///< the pin fired without LPCD_IRQ (see LpcdWake::irqStatus)
 };
 
+/// Wake event reported by Lpcd::waitForWake().
 struct LpcdWake {
-    LpcdWakeReason reason = LpcdWakeReason::Other;
-    uint32_t irqStatus = 0;  // IRQ_STATUS read right after the wake  DS Table 77
-    uint32_t elapsedMs = 0;  // since start()
+    LpcdWakeReason reason = LpcdWakeReason::Other;  ///< card detected or other IRQ
+    uint32_t irqStatus = 0;  ///< IRQ_STATUS read right after the wake  DS Table 77
+    uint32_t elapsedMs = 0;  ///< since start()
 };
 
+/// Low-power card detection (LPCD, DS 11.8.10): the chip sleeps and wakes
+/// the host through the IRQ pin when the antenna load changes. See the file
+/// comment of Lpcd.h for the data sheet behaviour and its consequences.
+///
+/// Single owner: an Lpcd shares its Pn5180 with the protocol objects; do not
+/// use any of them while LPCD is armed (they return LowPowerActive).
 class Lpcd {
 public:
+    /// @param nfc driver; must outlive this object
     explicit Lpcd(Pn5180& nfc) : nfc_(nfc) {}
 
-    // Reads the LPCD EEPROM settings (0x34..0x38). MalformedData if 0x38
-    // bits 1:0 hold a reserved calibration mode (10b/11b, DS Table 73); the
-    // other fields of `out` are filled even then, `out.calibration` is left
-    // unchanged. configure() overwrites such a value with the requested mode.
+    /// Reads the LPCD EEPROM settings (0x34..0x38). MalformedData if 0x38
+    /// bits 1:0 hold a reserved calibration mode (10b/11b, DS Table 73); the
+    /// other fields of @p out are filled even then, `out.calibration` is left
+    /// unchanged. configure() overwrites such a value with the requested mode.
     Status readSettings(LpcdSettings& out);
 
-    // Writes the settings to EEPROM, byte by byte and only where the stored
-    // value differs (EEPROM write endurance); RFU / GPO bits sharing a byte
-    // are preserved. `bytesWritten` counts the EEPROM bytes written (0 when
-    // everything already matched). InvalidArgument for gear > 15 or an
-    // unknown calibration mode. The Pn5180 EEPROM write guard is enabled
-    // only for these writes and restored afterwards.
+    /// Writes the settings to EEPROM, byte by byte and only where the stored
+    /// value differs (EEPROM write endurance); RFU / GPO bits sharing a byte
+    /// are preserved. @p bytesWritten counts the EEPROM bytes written (0 when
+    /// everything already matched). InvalidArgument for gear > 15 or an
+    /// unknown calibration mode. The Pn5180 EEPROM write guard is enabled
+    /// only for these writes and restored afterwards.
     Status configure(const LpcdSettings& settings, size_t& bytesWritten);
 
-    // Enters LPCD (SWITCH_MODE mode 1) with `wakeupCounterMs` (1..1023,
-    // see spec::switchmode::kWakeupCounterMaxMs: DS Table 21 vs. Figure 40)
-    // of standby between two detection cycles. Unsupported without an IRQ
-    // pin, InvalidArgument outside the range. Switches the RF field off
-    // (RF_OFF) before SWITCH_MODE. With self calibration, AGC_REF_CONFIG is
-    // read first to run the calibration (DS Table 112).
+    /// Enters LPCD (SWITCH_MODE mode 1) with @p wakeupCounterMs (1..1023,
+    /// see spec::switchmode::kWakeupCounterMaxMs: DS Table 21 vs. Figure 40)
+    /// of standby between two detection cycles. Unsupported without an IRQ
+    /// pin, InvalidArgument outside the range. Switches the RF field off
+    /// (RF_OFF) before SWITCH_MODE. With self calibration, AGC_REF_CONFIG is
+    /// read first to run the calibration (DS Table 112).
     Status start(uint16_t wakeupCounterMs);
 
-    // Waits on the IRQ pin only (no SPI) for up to `timeoutMs`. IrqTimeout:
-    // nothing happened, LPCD is still armed - call again or cancel(). Ok:
-    // the chip woke; `wake` holds the reason, IRQ_STATUS has been read and
-    // cleared and the chip hard-reset, so it is ready for normal use.
+    /// Waits on the IRQ pin only (no SPI) for up to @p timeoutMs. IrqTimeout:
+    /// nothing happened, LPCD is still armed - call again or cancel(). Ok:
+    /// the chip woke; @p wake holds the reason, IRQ_STATUS has been read and
+    /// cleared and the chip hard-reset, so it is ready for normal use.
     Status waitForWake(uint32_t timeoutMs, LpcdWake& wake);
 
-    // Leaves LPCD by hard reset (the only forced exit, DS Table 18).
+    /// Leaves LPCD by hard reset (the only forced exit, DS Table 18).
     Status cancel();
 
+    /// Whether LPCD is armed (between start() and the wake / cancel()).
     bool armed() const { return nfc_.lowPowerActive(); }
 
 private:

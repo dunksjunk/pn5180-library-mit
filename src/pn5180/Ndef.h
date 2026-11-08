@@ -60,53 +60,60 @@ constexpr size_t kMaxLangLength = 63;
 constexpr uint8_t kUriCodeMax = 0x23;
 }  // namespace ndef
 
-// One record of a parsed message. Pointers point into the message buffer.
+/// One record of a parsed message. Pointers point into the message buffer.
 struct NdefRecord {
-    uint8_t header = 0;           // raw first octet (flags + TNF)
-    uint8_t tnf = 0;              // header & ndef::TNF_MASK
-    const uint8_t* type = nullptr;
-    size_t typeLength = 0;
-    const uint8_t* id = nullptr;
-    size_t idLength = 0;
-    const uint8_t* payload = nullptr;
-    size_t payloadLength = 0;
+    uint8_t header = 0;           ///< raw first octet (flags + TNF)
+    uint8_t tnf = 0;              ///< header & ndef::TNF_MASK  NDEF 3.2.6
+    const uint8_t* type = nullptr;     ///< record type (typeLength bytes)
+    size_t typeLength = 0;             ///< TYPE_LENGTH  NDEF 3.2.7
+    const uint8_t* id = nullptr;       ///< record ID (idLength bytes), nullptr if absent
+    size_t idLength = 0;               ///< ID_LENGTH  NDEF 3.2.8
+    const uint8_t* payload = nullptr;  ///< payload (payloadLength bytes)
+    size_t payloadLength = 0;          ///< PAYLOAD_LENGTH  NDEF 3.2.9
+    /// Message Begin flag.  NDEF 3.2.1
     bool mb() const { return (header & ndef::FLAG_MB) != 0; }
+    /// Message End flag.  NDEF 3.2.2
     bool me() const { return (header & ndef::FLAG_ME) != 0; }
+    /// Short Record flag.  NDEF 3.2.4
     bool shortRecord() const { return (header & ndef::FLAG_SR) != 0; }
-    // True for TNF Well-known with the single-character type `t` (e.g. 'U').
+    /// True for TNF Well-known with the single-character type @p t (e.g. 'U').
     bool isWellKnown(uint8_t t) const {
         return tnf == ndef::TNF_WELL_KNOWN && typeLength == 1 && type != nullptr && type[0] == t;
     }
 };
 
-// Forward iterator over a raw NDEF message. Never reads outside
-// [msg, msg + len). Usage:
-//   NdefParser p(buf, len);
-//   NdefRecord r;
-//   while (!p.done()) { Status s = p.next(r); if (!ok(s)) break; ... }
-// An empty message (len 0, e.g. an NDEF TLV of length 0) has no records and
-// is done() at once. A null `msg` with a non-zero `len` is invalid input, not
-// an empty message: done() is false and next() returns InvalidArgument.
+/// Forward iterator over a raw NDEF message. Never reads outside the
+/// @p len bytes at @p msg. Usage:
+/// @code
+/// NdefParser p(buf, len);
+/// NdefRecord r;
+/// while (!p.done()) { Status s = p.next(r); if (!ok(s)) break; ... }
+/// @endcode
+/// An empty message (len 0, e.g. an NDEF TLV of length 0) has no records and
+/// is done() at once. A null `msg` with a non-zero `len` is invalid input, not
+/// an empty message: done() is false and next() returns InvalidArgument.
 class NdefParser {
 public:
+    /// @param msg raw NDEF message (must stay valid while parsing)
+    /// @param len its length in bytes
     NdefParser(const uint8_t* msg, size_t len) : msg_(msg), len_(len) {}
 
-    // True after the record with ME set, for an empty message, or after an
-    // error (the parser does not continue past malformed data).
+    /// True after the record with ME set, for an empty message, or after an
+    /// error (the parser does not continue past malformed data).
     bool done() const { return done_; }
 
-    // Next record:
-    //   Ok             `rec` filled
-    //   MalformedData  a length runs past the end of the message, MB missing
-    //                  on the first record or set on a later one, the
-    //                  message ends without ME, or a record violates the TNF
-    //                  rules (Empty with non-zero lengths, Unknown/Unchanged
-    //                  with a type, Unchanged outside a chunk)
-    //   Unsupported    chunked record (CF = 1): not supported by this driver
-    //   InvalidArgument called when done(), or null `msg` with len > 0
+    /// Next record.
+    /// @return
+    /// - Ok: @p rec filled
+    /// - MalformedData: a length runs past the end of the message, MB missing
+    ///   on the first record or set on a later one, the message ends without
+    ///   ME, or a record violates the TNF rules (Empty with non-zero lengths,
+    ///   Unknown/Unchanged with a type, Unchanged outside a chunk)
+    /// - Unsupported: chunked record (CF = 1), not supported by this driver
+    /// - InvalidArgument: called when done(), or null `msg` with len > 0
     Status next(NdefRecord& rec);
 
-    // Number of records returned so far.
+    /// Number of records returned so far.
     size_t count() const { return count_; }
 
 private:
@@ -117,36 +124,41 @@ private:
     bool done_ = (len_ == 0);
 };
 
-// Parses the whole message; `records` = number of records (0 for len 0).
-// Returns the first error of NdefParser::next(), else Ok.
+/// Parses the whole message; @p records = number of records (0 for len 0).
+/// Returns the first error of NdefParser::next(), else Ok.
 Status validateNdefMessage(const uint8_t* msg, size_t len, size_t& records);
 
-// Appends records to a caller buffer. MB is set on the first record and ME on
-// the last one appended (the previous record's ME is cleared on each
-// append). Short-record format is used when the payload is <= 255 bytes.
-// A failed append leaves the buffer content unchanged.
+/// Appends records to a caller buffer. MB is set on the first record and ME on
+/// the last one appended (the previous record's ME is cleared on each
+/// append). Short-record format is used when the payload is at most 255 bytes.
+/// A failed append leaves the buffer content unchanged.
 class NdefBuilder {
 public:
+    /// @param buf      output buffer (must stay valid while building)
+    /// @param capacity its size in bytes
     NdefBuilder(uint8_t* buf, size_t capacity) : buf_(buf), cap_(buf == nullptr ? 0 : capacity) {}
 
-    // Generic record (no chunking).
-    //   BufferTooSmall  record does not fit into the remaining capacity
-    //   InvalidArgument TNF Unchanged/Reserved, type/ID longer than 255,
-    //                   Empty with any length != 0, Unknown with a type,
-    //                   null pointer with non-zero length
+    /// Generic record (no chunking).
+    /// @return BufferTooSmall if the record does not fit into the remaining
+    /// capacity; InvalidArgument for TNF Unchanged/Reserved, type/ID longer
+    /// than 255, Empty with any length != 0, Unknown with a type, or a null
+    /// pointer with non-zero length.
     Status addRecord(uint8_t tnf, const uint8_t* type, size_t typeLength, const uint8_t* id,
                      size_t idLength, const uint8_t* payload, size_t payloadLength);
 
-    // Well-known URI record: the longest matching URI identifier code is
-    // used and the rest of `uri` (NUL-terminated) stored after it.  RTD URI 3.2
+    /// Well-known URI record: the longest matching URI identifier code is
+    /// used and the rest of @p uri (NUL-terminated) stored after it.  RTD URI 3.2
     Status addUri(const char* uri);
 
-    // Well-known Text record, UTF-8: status byte (language length), the
-    // language code (e.g. "en", 1..63 bytes) and the text.  RTD Text 3.2
+    /// Well-known Text record, UTF-8: status byte (language length), the
+    /// language code (e.g. "en", 1..63 bytes) and the text.  RTD Text 3.2
     Status addText(const char* text, const char* lang = "en");
 
+    /// The message built so far.
     const uint8_t* data() const { return buf_; }
+    /// Its length in bytes.
     size_t size() const { return size_; }
+    /// Number of records appended.
     size_t records() const { return records_; }
 
 private:
@@ -162,35 +174,37 @@ private:
     size_t lastHeader_ = 0;  // offset of the last record's header octet
 };
 
-// URI identifier code table.                         RTD URI 3.2.2
-// Prefix string for `code` ("" for 00h), nullptr for RFU codes (24h..FFh).
+/// URI identifier code table (RTD URI 3.2.2): prefix string for @p code
+/// ("" for 00h), nullptr for RFU codes (24h..FFh).
 const char* ndefUriPrefix(uint8_t code);
-// Code of the longest prefix in the table that `uri` starts with (00h if
-// none) and that prefix's length.
+/// Code of the longest prefix in the table that @p uri starts with (00h if
+/// none) and that prefix's length.  RTD URI 3.2.2
 uint8_t ndefUriCodeFor(const char* uri, size_t& prefixLength);
 
-// Decoded URI record: prefix (from the code) + rest (bytes of the payload).
+/// Decoded URI record: prefix (from the code) + rest (bytes of the payload).
 struct NdefUri {
-    const char* prefix = "";
-    const uint8_t* rest = nullptr;
-    size_t restLength = 0;
+    const char* prefix = "";        ///< NUL-terminated prefix from the identifier code
+    const uint8_t* rest = nullptr;  ///< rest of the URI (points into the payload)
+    size_t restLength = 0;          ///< bytes in rest
 };
-//   Ok, InvalidArgument (not a Well-known "U" record), MalformedData (empty
-//   payload), Unsupported (RFU identifier code).
+/// Decodes a URI record.
+/// @return Ok, InvalidArgument (not a Well-known "U" record), MalformedData
+/// (empty payload), Unsupported (RFU identifier code).
 Status decodeNdefUri(const NdefRecord& rec, NdefUri& out);
-// True if prefix + rest equals `uri` (NUL-terminated).
+/// True if prefix + rest equals @p uri (NUL-terminated).
 bool ndefUriEquals(const NdefUri& u, const char* uri);
 
-// Decoded Text record (pointers into the payload).
+/// Decoded Text record (pointers into the payload).  RTD Text 3.2.1
 struct NdefText {
-    bool utf16 = false;
-    const uint8_t* lang = nullptr;
-    size_t langLength = 0;
-    const uint8_t* text = nullptr;
-    size_t textLength = 0;
+    bool utf16 = false;             ///< status byte b7: UTF-16 instead of UTF-8
+    const uint8_t* lang = nullptr;  ///< IANA language code
+    size_t langLength = 0;          ///< bytes in lang
+    const uint8_t* text = nullptr;  ///< the text
+    size_t textLength = 0;          ///< bytes in text
 };
-//   Ok, InvalidArgument (not a Well-known "T" record), MalformedData (empty
-//   payload, language length past the payload, or RFU bit b6 set).
+/// Decodes a Text record.
+/// @return Ok, InvalidArgument (not a Well-known "T" record), MalformedData
+/// (empty payload, language length past the payload, or RFU bit b6 set).
 Status decodeNdefText(const NdefRecord& rec, NdefText& out);
 
 }  // namespace pn5180
