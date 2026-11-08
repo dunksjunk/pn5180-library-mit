@@ -45,8 +45,9 @@ public:
     size_t size() const override { return t2t::kPageBytes; }
     Status read(uint8_t* out) override;  // READ returns 4 pages; keeps the first
     Status write(const uint8_t* in) override { return tag_.write(page_, in); }
-    // Field off/on, WUPA activation, and a check that the same UID answered
-    // (CardError otherwise). Without a reader: Ok, nothing done.
+    // Field off/on, then WUPA + SELECT of this UID (Iso14443a::activateUid,
+    // up to ActivateRetry{}.attempts tries), so another card in the field
+    // cannot answer instead. Without a reader: Ok, nothing done.
     Status recover() override;
 
 private:

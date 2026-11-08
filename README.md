@@ -84,12 +84,29 @@ The examples default to this pin map. Every pin can be changed.
 | `src/PN5180ArduinoHal.*` | Arduino-ESP32 HAL (compiled only when `ARDUINO` is defined) |
 | `examples/Basic/` | reset, version readout, IRQ_STATUS and the IRQ pin self-test on the reference test bed |
 | `examples/LowPowerDetect/` | low-power card detection (LPCD): sleep until the antenna load changes, then read the cards (needs the IRQ pin) |
-| `examples/ReadUid/`, `examples/ReadUid15693/` | UIDs of ISO/IEC 14443A / ISO/IEC 15693 cards |
+| `examples/ReadUid/`, `examples/ReadUid15693/` | UIDs of all ISO/IEC 14443A / ISO/IEC 15693 cards in the field |
 | `examples/MemoryTest/` | non-destructive write test of the last user page/block of Type 2 Tags and ISO/IEC 15693 cards |
 | `examples/NdefDemo/` | prints the NDEF message of Type 2 / Type 5 Tags, writes and verifies a test message, restores the original |
 | `tests/host/` | PC unit test of the core against a fake HAL |
 
 Host test: `g++ -std=c++17 -Wall -Wextra -Werror -Isrc tests/host/test_core.cpp src/pn5180/*.cpp && ./a.out`
+
+## Several ISO/IEC 14443A cards
+
+`Iso14443a::select()` resolves bit collisions (ISO/IEC 14443-3 6.5.3, with
+bit-oriented ANTICOLLISION frames). At each collision it takes the card with
+a 1 at the collided bit, so exactly one card ends up selected.
+`enumerate(cards, max, count)` finds every card: select one, HLTA it, repeat
+with REQA. It returns `BufferTooSmall` if more than `max` cards answer.
+HALTed cards stay silent until WUPA or a field reset (`enumerate(..., true)`
+resets the field first). `activateUid(uid, len, card)` (WUPA + `selectUid`)
+re-selects one known card while others are present.
+
+```cpp
+pn5180::CardA cards[8];
+size_t count = 0;
+pn5180::Status s = reader.enumerate(cards, 8, count);  // after reader.fieldOn()
+```
 
 ## IRQ pin and low-power card detection
 

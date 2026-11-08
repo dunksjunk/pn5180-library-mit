@@ -170,6 +170,10 @@ constexpr uint32_t kCommandTransceive = 0x3u;         // Transceive            D
 constexpr uint32_t kCrcTxEnable = 1u << 0;
 // CRC_RX_CONFIG bit 0 RX_CRC_ENABLE: Rx-Decoder checks the CRC.             DS Table 92; AN12650 4.1.3 line 4
 constexpr uint32_t kCrcRxEnable = 1u << 0;
+// CRC_RX_CONFIG bits 8:6 RX_BIT_ALIGN: bit position within the first byte
+// for the first received bit; further bits follow.                         DS Table 92
+constexpr unsigned kCrcRxBitAlignShift = 6;
+constexpr uint32_t kCrcRxBitAlignMask = 0x7u << kCrcRxBitAlignShift;
 
 // RX_STATUS fields (DS Table 93)
 namespace rxstatus {

@@ -94,15 +94,17 @@ Status Type2TagPage::recover() {
     if (!ok(s)) {
         return s;
     }
+    // WUPA + SELECT of this UID only, so other cards in the field cannot
+    // take its place (they drop back to IDLE).  ISO/IEC 14443-3 6.4.1, 6.5.3.3
     CardA card;
-    s = reader_->activateWithRetry(card, true);  // WUPA  ISO/IEC 14443-3 6.4.1
-    if (!ok(s)) {
-        return s;
+    const ActivateRetry policy;
+    for (uint8_t i = 0; i < policy.attempts; ++i) {
+        s = reader_->activateUid(uid_, uidLen_, card, true);
+        if (ok(s) || requiresRecovery(s) || s == Status::InvalidArgument) {
+            break;
+        }
     }
-    if (card.uidLen != uidLen_ || !equal(card.uid, uid_, uidLen_)) {
-        return Status::CardError;  // another card answered
-    }
-    return Status::Ok;
+    return s;
 }
 
 MemTestResult runMemTest(MemoryUnit& unit, const uint8_t* seed, size_t seedLen) {

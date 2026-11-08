@@ -5,7 +5,8 @@
 // 16-slot INVENTORY. Reference test bed:
 //   ESP32-D0WD-V3 dev board + generic PN5180 module
 //   SCK 18, MISO 19, MOSI 23, NSS 16, BUSY 5, RST 17, IRQ 15 (strapping pin
-//   MTDO; the PN5180 IRQ idles high (active low, EEPROM 0x1A), so boot is unaffected).
+//   MTDO: low at reset only silences the ROM boot log; the PN5180 IRQ idles
+//   inactive, see the polarity printed by the Basic example, EEPROM 0x1A, DS Table 51).
 //
 // Every ~500 ms: RF field on, 16-slot INVENTORY, one line per card
 //   ISO15693 UID: E0 04 01 50 12 34 56 78  DSFID: 00

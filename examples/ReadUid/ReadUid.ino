@@ -1,17 +1,21 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Rich Dunkel
 //
-// Reads the UID of an ISO/IEC 14443 Type A card (4, 7 or 10 bytes).
+// Reads the UIDs of all ISO/IEC 14443 Type A cards in the field (4, 7 or
+// 10 bytes each), resolving collisions (Iso14443a::enumerate).
 // Reference test bed:
 //   ESP32-D0WD-V3 dev board + generic PN5180 module
 //   SCK 18, MISO 19, MOSI 23, NSS 16, BUSY 5, RST 17, IRQ 15 (strapping pin
-//   MTDO; the PN5180 IRQ idles high (active low, EEPROM 0x1A), so boot is unaffected).
+//   MTDO: low at reset only silences the ROM boot log; the PN5180 IRQ idles
+//   inactive, see the polarity printed by the Basic example, EEPROM 0x1A, DS Table 51).
 //
-// Every ~500 ms: RF field on, REQA + anticollision/SELECT (retried up to
-// three times after a garbled or missing answer, Iso14443a::activateWithRetry),
-// print
+// Every ~500 ms: RF field on, then per card REQA + anticollision/SELECT +
+// HLTA until no card answers (a garbled or missing answer is retried up to
+// twice per poll), one line per card:
 //   UID: 04 A1 B2 C3 D4 E5 F6  ATQA: 0044  SAK: 00
-// then HLTA and RF field off. No card: nothing is printed. An error that
+// (with several cards the ATQA can be the superposition of their ATQAs),
+// then RF field off, which wakes the HALTed cards for the next poll.
+// No card: nothing is printed. An error that
 // persists over all attempts is printed by Status name. Device/transport
 // errors (and a failed RF off) trigger a hardware reset; a failed start-up
 // is retried every 5 s.
@@ -35,6 +39,7 @@ constexpr int8_t PIN_IRQ = 15;  // -1 = not connected: IRQ_STATUS is polled inst
 constexpr uint32_t SPI_CLOCK_HZ = 1000000u;
 constexpr uint32_t POLL_INTERVAL_MS = 500;
 constexpr uint32_t INIT_RETRY_MS = 5000;  // retry after a failed start-up / reset
+constexpr size_t MAX_CARDS = 8;           // cards listed per poll
 
 const pn5180::ArduinoPins kPins = {PIN_SCK, PIN_MISO, PIN_MOSI, PIN_NSS,
                                    PIN_BUSY, PIN_RST, PIN_IRQ};
@@ -123,15 +128,18 @@ void pollOnce() {
         }
         return;
     }
-    pn5180::CardA card;
-    // A single garbled or missing answer is retried (bounded, see ActivateRetry).
-    s = reader.activateWithRetry(card);
-    if (pn5180::ok(s)) {
-        printCard(card);
-        if (!check("HLTA", reader.halt())) {
-            return;
-        }
-    } else if (!check("activate", s)) {
+    // Every card in the field: anticollision resolves the collisions, each
+    // card is SELECTed, then HALTed so the next REQA finds the others. A
+    // garbled or missing answer is retried (bounded, see ActivateRetry).
+    pn5180::CardA cards[MAX_CARDS];
+    size_t count = 0;
+    s = reader.enumerate(cards, MAX_CARDS, count);
+    for (size_t i = 0; i < count; ++i) {
+        printCard(cards[i]);
+    }
+    if (s == pn5180::Status::BufferTooSmall) {
+        Serial.println("(more cards in the field than MAX_CARDS)");
+    } else if (!check("enumerate", s)) {
         return;
     }
     s = reader.fieldOff();  // RF field off between polls

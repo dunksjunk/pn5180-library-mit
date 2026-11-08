@@ -8,6 +8,7 @@
 //        src/pn5180/MemTest.cpp
 #include <cstdio>
 #include <cstring>
+#include <initializer_list>
 
 #include "FakeHal.h"
 #include "pn5180/Iso14443a.h"
@@ -121,7 +122,7 @@ void expectActivation(FakeCardA& card, uint8_t expectedSak) {
     EXPECT(card.selectSawCrc);
     // HLTA: card stays silent -> Ok; REQA then gets no answer, WUPA does.
     EXPECT(reader.halt() == Status::Ok);
-    EXPECT(card.halted);
+    EXPECT(card.halted());
     EXPECT(reader.activate(out) == Status::NoResponse);
     EXPECT(reader.activate(out, true) == Status::Ok);
     EXPECT(reader.fieldOff() == Status::Ok);
@@ -185,7 +186,8 @@ void testActivateRetry() {
         CardA out;
         ActivateRetry p;
         p.attempts = 4;
-        EXPECT(r.reader.activateWithRetry(out, false, p) == Status::Collision);
+        // a collision flag on a 1-byte "ATQA" is noise, not a collision
+        EXPECT(r.reader.activateWithRetry(out, false, p) == Status::IntegrityError);
         EXPECT(r.hal.requestsA == 4);
     }
     {  // persistent silence -> NoResponse after the default 3 attempts
@@ -237,6 +239,167 @@ void testActivateRetry() {
     }
 }
 
+// Several Type A cards: bit-wise collisions resolved by anticollision.
+struct MultiA {
+    FakeCardA c[4];
+    FakeHal hal;
+    Pn5180 nfc{hal};
+    Iso14443a reader{nfc};
+    explicit MultiA(int n) {
+        for (int i = 0; i < n; ++i) hal.cardsA[i] = &c[i];
+        EXPECT(nfc.begin() == Status::Ok);
+        EXPECT(reader.fieldOn() == Status::Ok);
+    }
+    void set(int i, std::initializer_list<uint8_t> uid, uint8_t sak = 0x00) {
+        c[i].uidLen = 0;
+        for (uint8_t b : uid) c[i].uid[c[i].uidLen++] = b;
+        c[i].sak = sak;
+    }
+    bool alignClear() const {
+        return (hal.regs[spec::reg::CRC_RX_CONFIG] & spec::kCrcRxBitAlignMask) == 0;
+    }
+    int badFrames() const { return c[0].badFrames + c[1].badFrames + c[2].badFrames + c[3].badFrames; }
+};
+
+bool sameUid(const CardA& a, const FakeCardA& f) {
+    return a.uidLen == f.uidLen && std::memcmp(a.uid, f.uid, f.uidLen) == 0;
+}
+
+// enumerate() must list exactly the cards c[0..n), each once.
+void expectEnumerated(MultiA& m, int n, bool wakeup = false) {
+    CardA list[4];
+    size_t count = 99;
+    EXPECT(m.reader.enumerate(list, 4, count, wakeup) == Status::Ok);
+    EXPECT(count == size_t(n));
+    for (int i = 0; i < n; ++i) {
+        int hits = 0;
+        for (size_t k = 0; k < count; ++k) hits += sameUid(list[k], m.c[i]) ? 1 : 0;
+        EXPECT(hits == 1);
+        EXPECT(m.c[i].halted());
+    }
+    EXPECT(m.alignClear());
+    EXPECT(m.badFrames() == 0);
+}
+
+void testMultiCardA() {
+    {  // differ in the first UID bit: policy picks the card with a 1 there
+        MultiA m(2);
+        m.set(0, {0x10, 0x22, 0x33, 0x44});
+        m.set(1, {0x11, 0x22, 0x33, 0x44}, 0x08);
+        CardA out;
+        EXPECT(m.reader.activate(out) == Status::Ok);
+        EXPECT(sameUid(out, m.c[1]) && out.sak == 0x08);
+        EXPECT(m.c[1].state == FakeCardA::Active && m.c[0].state == FakeCardA::Idle);
+        EXPECT(m.alignClear() && m.badFrames() == 0);
+        EXPECT(m.reader.halt() == Status::Ok);
+        EXPECT(m.reader.activate(out) == Status::Ok);  // the other one, alone now
+        EXPECT(sameUid(out, m.c[0]));
+    }
+    {  // differ only in the last UID CLn bit (bit 31), and so in BCC too
+        MultiA m(2);
+        m.set(0, {0x5A, 0xA5, 0x0F, 0x01});
+        m.set(1, {0x5A, 0xA5, 0x0F, 0x81});
+        CardA out;
+        EXPECT(m.reader.activate(out) == Status::Ok);
+        EXPECT(sameUid(out, m.c[1]));
+        expectEnumerated(m, 2, true);
+    }
+    {  // same UID CLn, only one BCC differs (corrupt): never Ok with a wrong card
+        MultiA m(2);
+        m.set(0, {0x01, 0x02, 0x03, 0x04});
+        m.set(1, {0x01, 0x02, 0x03, 0x04});
+        m.c[1].corruptBcc = true;
+        CardA out;
+        const Status s = m.reader.activate(out);
+        EXPECT(s == Status::IntegrityError || (s == Status::Ok && sameUid(out, m.c[0])));
+        EXPECT(m.alignClear());
+    }
+    {  // 3 cards, 7-byte UIDs sharing CL1 collide only at cascade level 2
+        MultiA m(3);
+        m.set(0, {0x04, 0xBB, 0x6A, 0x04, 0xCC, 0x2A, 0x81});
+        m.set(1, {0x04, 0xBB, 0x6A, 0x05, 0xCC, 0x2A, 0x81});
+        m.set(2, {0x04, 0xBB, 0x6A, 0x04, 0xCC, 0x2A, 0x01});
+        expectEnumerated(m, 3);
+    }
+    {  // 4/7/10-byte mix with collisions at level 1 (CT vs UID byte)
+        MultiA m(4);
+        m.set(0, {0x89, 0x01, 0x02, 0x03});  // differs from CT 88h in bit 0 only
+        m.set(1, {0x04, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66});
+        m.set(2, {0x04, 0x11, 0x22, 0x33, 0x44, 0x55, 0x67, 0x77, 0x88, 0x99}, 0x20);
+        m.set(3, {0x08, 0x11, 0x22, 0x33});
+        expectEnumerated(m, 4);
+        // all HALTed: REQA finds nothing, WUPA all of them again
+        expectEnumerated(m, 0);
+        expectEnumerated(m, 4, true);
+    }
+    {  // more cards than fit: BufferTooSmall, the first `max` listed
+        MultiA m(3);
+        m.set(0, {0x01, 0x00, 0x00, 0x00});
+        m.set(1, {0x02, 0x00, 0x00, 0x00});
+        m.set(2, {0x04, 0x00, 0x00, 0x00});
+        CardA list[2];
+        size_t count = 0;
+        EXPECT(m.reader.enumerate(list, 2, count) == Status::BufferTooSmall);
+        EXPECT(count == 2);
+        EXPECT(m.c[0].halted() + m.c[1].halted() + m.c[2].halted() == 2);
+        CardA none[1];
+        EXPECT(m.reader.enumerate(none, 0, count) == Status::BufferTooSmall && count == 0);
+        EXPECT(m.reader.enumerate(nullptr, 1, count) == Status::InvalidArgument);
+    }
+    {  // noise (garbled frame) during enumerate: retried, all cards found
+        MultiA m(2);
+        m.set(0, {0x10, 0x20, 0x30, 0x40});
+        m.set(1, {0x10, 0x20, 0x31, 0x40});
+        m.hal.faultSkipA = 1;  // REQA fine, first ANTICOLLISION answer is noise
+        m.hal.garbleA = 1;
+        expectEnumerated(m, 2);
+    }
+    {  // noise alone (collision flag, wrong length) is an error, not a card
+        MultiA m(1);
+        m.set(0, {0x10, 0x20, 0x30, 0x40});
+        m.hal.faultSkipA = 1;
+        m.hal.garbleA = 1;
+        CardA out;
+        EXPECT(m.reader.activate(out) == Status::IntegrityError);
+        EXPECT(m.alignClear());
+        m.hal.garbleA = 100;
+        CardA list[2];
+        size_t count = 9;
+        EXPECT(m.reader.enumerate(list, 2, count) == Status::IntegrityError && count == 0);
+    }
+    {  // selectUid / activateUid: select a known card among several
+        MultiA m(2);
+        m.set(0, {0x04, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66});
+        m.set(1, {0x04, 0x11, 0x22, 0x33, 0x44, 0x55, 0x67}, 0x00);
+        uint16_t atqa = 0;
+        EXPECT(m.reader.request(atqa) == Status::Ok);
+        CardA out;
+        EXPECT(m.reader.selectUid(m.c[0].uid, 7, out) == Status::Ok);
+        EXPECT(sameUid(out, m.c[0]));
+        EXPECT(m.c[0].state == FakeCardA::Active && m.c[1].state == FakeCardA::Idle);
+        EXPECT(m.reader.halt() == Status::Ok);
+        // HALTed card: REQA + selectUid finds nobody with that UID
+        EXPECT(m.reader.activateUid(m.c[0].uid, 7, out, false) == Status::NoResponse);
+        EXPECT(m.reader.activateUid(m.c[0].uid, 7, out, true) == Status::Ok);  // WUPA
+        EXPECT(sameUid(out, m.c[0]) && m.c[0].state == FakeCardA::Active);
+        EXPECT(m.reader.selectUid(m.c[0].uid, 5, out) == Status::InvalidArgument);
+        EXPECT(m.reader.selectUid(nullptr, 4, out) == Status::InvalidArgument);
+        const uint8_t unknown[4] = {9, 9, 9, 9};
+        EXPECT(m.reader.request(atqa, true) == Status::Ok);
+        EXPECT(m.reader.selectUid(unknown, 4, out) == Status::NoResponse);
+        EXPECT(m.badFrames() == 0);
+    }
+    {  // ATQA collision (different ATQAs) is not an error
+        MultiA m(2);
+        m.set(0, {0x01, 0x02, 0x03, 0x04});
+        m.set(1, {0x81, 0x02, 0x03, 0x04});
+        m.c[1].atqa[0] = 0x04;
+        uint16_t atqa = 0;
+        EXPECT(m.reader.request(atqa) == Status::Ok);
+        expectEnumerated(m, 2, true);
+    }
+}
+
 void testIso14443a() {
     // 4-, 7- and 10-byte UIDs (cascade levels 1..3).  ISO/IEC 14443-3 6.5.4
     FakeCardA single;
@@ -274,19 +437,6 @@ void testIso14443a() {
         EXPECT((hal.regs[spec::reg::SYSTEM_CONFIG] & spec::kSystemConfigCommandMask) ==
                spec::kCommandIdle);
     }
-    // Collision in the anticollision answer -> Collision (not resolved).
-    {
-        FakeCardA c;
-        c.collide = true;
-        FakeHal hal;
-        hal.card = &c;
-        Pn5180 nfc(hal);
-        Iso14443a reader(nfc);
-        EXPECT(nfc.begin() == Status::Ok);
-        EXPECT(reader.fieldOn() == Status::Ok);
-        CardA out;
-        EXPECT(reader.activate(out) == Status::Collision);
-    }
     // Wrong BCC -> IntegrityError.
     {
         FakeCardA c;
@@ -301,6 +451,7 @@ void testIso14443a() {
         EXPECT(reader.activate(out) == Status::IntegrityError);
     }
     testActivateRetry();
+    testMultiCardA();
 }
 
 // Card from the M2 bring-up: single-slot INVENTORY answered

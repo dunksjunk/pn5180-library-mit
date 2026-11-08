@@ -5,9 +5,10 @@
 // (ISO/IEC 15693). Reference test bed:
 //   ESP32-D0WD-V3 dev board + generic PN5180 module
 //   SCK 18, MISO 19, MOSI 23, NSS 16, BUSY 5, RST 17, IRQ 15 (strapping pin
-//   MTDO; the PN5180 IRQ idles high (active low, EEPROM 0x1A), so boot is unaffected).
+//   MTDO: low at reset only silences the ROM boot log; the PN5180 IRQ idles
+//   inactive, see the polarity printed by the Basic example, EEPROM 0x1A, DS Table 51).
 //
-// Polling and recovery as in MemoryTest (14443A with activateWithRetry, then
+// Polling and recovery as in MemoryTest (14443A with enumerate + activateUid, then
 // a 16-slot ISO 15693 inventory, field off in between). Once per card
 // presence:
 //   - the existing NDEF message is printed record by record (or "NDEF none" /
@@ -73,7 +74,8 @@ struct Seen {
     uint8_t misses = 0;
     bool present = false;
 };
-Seen seenA[2];
+constexpr size_t MAX_CARDS_A = 4;  // Type A cards handled per poll
+Seen seenA[MAX_CARDS_A];
 Seen seenV[pn5180::iso15693::kSlots];
 
 bool sameUid(const Seen& s, const uint8_t* uid, uint8_t len) {
@@ -112,6 +114,28 @@ bool remember(Seen* list, size_t count, const uint8_t* uid, uint8_t len) {
     slot->uidLen = len;
     slot->present = true;
     return true;
+}
+
+// Drops `uid` from the list (it was not handled, e.g. activation failed).
+void forget(Seen* list, size_t count, const uint8_t* uid, uint8_t len) {
+    for (size_t i = 0; i < count; ++i) {
+        if (sameUid(list[i], uid, len)) {
+            list[i] = Seen{};
+        }
+    }
+}
+
+// WUPA + SELECT of one known card among HALTed ones, up to 3 tries after a
+// garbled or missing answer.  ISO/IEC 14443-3 6.4, 6.5.3.3
+pn5180::Status activateKnown(const uint8_t* uid, uint8_t uidLen, pn5180::CardA& active) {
+    pn5180::Status s = pn5180::Status::NoResponse;
+    for (uint8_t i = 0; i < 3; ++i) {
+        s = readerA.activateUid(uid, uidLen, active, true);
+        if (pn5180::ok(s) || pn5180::requiresRecovery(s)) {
+            break;
+        }
+    }
+    return s;
 }
 
 void agePoll(Seen* list, size_t count) {
@@ -458,15 +482,9 @@ pn5180::Status t2Recover(void* ctx) {
     if (!pn5180::ok(s)) {
         return s;
     }
+    // SELECT by UID: another card in the field cannot answer instead.
     pn5180::CardA again;
-    s = readerA.activateWithRetry(again, true);
-    if (!pn5180::ok(s)) {
-        return s;
-    }
-    if (again.uidLen != t->card->uidLen || memcmp(again.uid, t->card->uid, again.uidLen) != 0) {
-        return pn5180::Status::CardError;
-    }
-    return pn5180::Status::Ok;
+    return activateKnown(t->card->uid, t->card->uidLen, again);
 }
 
 bool testT2t(const pn5180::CardA& card) {
@@ -502,30 +520,55 @@ void pollA() {
         }
         return;
     }
-    pn5180::CardA card;
-    s = readerA.activateWithRetry(card);
-    if (pn5180::ok(s)) {
-        if (!alreadyDone(seenA, 2, card.uid, card.uidLen) &&
-            remember(seenA, 2, card.uid, card.uidLen)) {
-            if ((card.sak & SAK_NOT_T2T_MASK) != 0) {
-                Serial.print("14443A card is not a Type 2 Tag (SAK ");
-                printHex2(card.sak);
-                Serial.print("), uid");
-                printBytes(card.uid, card.uidLen);
-                Serial.println();
-            } else if (!testT2t(card)) {
-                (void)nfc.rfOff();
-                ready = false;
+    // All cards in the field (each left HALTed); a garbled or missing answer
+    // is retried (bounded, see ActivateRetry).
+    pn5180::CardA cards[MAX_CARDS_A];
+    size_t count = 0;
+    s = readerA.enumerate(cards, MAX_CARDS_A, count);
+    if (s == pn5180::Status::BufferTooSmall) {
+        // More cards answered than fit: only the first MAX_CARDS_A are handled,
+        // and the same ones win every poll, so say so instead of skipping silently.
+        Serial.print("WARNING: more than ");
+        Serial.print(static_cast<unsigned>(MAX_CARDS_A));
+        Serial.println(" Type A cards in the field; the others are not handled (raise MAX_CARDS_A)");
+    } else if (!check("enumerate", s)) {
+        return;
+    }
+    for (size_t i = 0; i < count; ++i) {
+        const pn5180::CardA& card = cards[i];
+        if (alreadyDone(seenA, MAX_CARDS_A, card.uid, card.uidLen) ||
+            !remember(seenA, MAX_CARDS_A, card.uid, card.uidLen)) {
+            continue;
+        }
+        if ((card.sak & SAK_NOT_T2T_MASK) != 0) {
+            Serial.print("14443A card is not a Type 2 Tag (SAK ");
+            printHex2(card.sak);
+            Serial.print("), uid");
+            printBytes(card.uid, card.uidLen);
+            Serial.println();
+            continue;
+        }
+        // WUPA wakes the HALTed cards, SELECT with the UID picks this one
+        // (the others drop back to IDLE).  ISO/IEC 14443-3 6.4, 6.5.3.3
+        pn5180::CardA active;
+        s = activateKnown(card.uid, card.uidLen, active);
+        if (!pn5180::ok(s)) {
+            if (!check("activate", s)) {
                 return;
             }
+            forget(seenA, MAX_CARDS_A, card.uid, card.uidLen);  // try again next poll
+            continue;
+        }
+        if (!testT2t(card)) {
+            (void)nfc.rfOff();
+            ready = false;
+            return;
         }
         if (!check("HLTA", readerA.halt())) {
             return;
         }
-    } else if (!check("activate", s)) {
-        return;
     }
-    agePoll(seenA, 2);
+    agePoll(seenA, MAX_CARDS_A);
     (void)fieldOffBetweenPolls();
 }
 

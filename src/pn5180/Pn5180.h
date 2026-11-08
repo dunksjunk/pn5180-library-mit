@@ -102,6 +102,12 @@ public:
     // from the loaded RF configuration.  DS Table 92, Table 99; AN12650 4.1.3
     Status setCrc(bool txEnabled, bool rxEnabled);
 
+    // CRC_RX_CONFIG.RX_BIT_ALIGN (bits 8:6): the first received bit is stored
+    // at bit position `bits` (0..7) of the first rx byte, for bit-oriented
+    // frames. Only these bits are changed. InvalidArgument if bits > 7.
+    // RX_COLL_POS then includes this offset.  DS Table 92, Table 93
+    Status setRxBitAlign(uint8_t bits);
+
     // SYSTEM_CONFIG.COMMAND = IDLE: stop any ongoing RF communication.  DS Table 75
     Status idle();
 

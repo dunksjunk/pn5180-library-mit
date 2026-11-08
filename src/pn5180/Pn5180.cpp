@@ -593,6 +593,19 @@ Status Pn5180::setCrc(bool txEnabled, bool rxEnabled) {
     return s;
 }
 
+Status Pn5180::setRxBitAlign(uint8_t bits) {
+    if (bits > 7) {
+        return Status::InvalidArgument;
+    }
+    // Clear RX_BIT_ALIGN, then OR in the new value.  DS Table 92
+    Status s = writeRegisterAndMask(spec::reg::CRC_RX_CONFIG, ~spec::kCrcRxBitAlignMask);
+    if (ok(s) && bits != 0) {
+        s = writeRegisterOrMask(spec::reg::CRC_RX_CONFIG,
+                                static_cast<uint32_t>(bits) << spec::kCrcRxBitAlignShift);
+    }
+    return s;
+}
+
 Status Pn5180::idle() {
     // AND mask clears COMMAND (bits 2:0) to IDLE.  DS Table 75; AN12650 4.1.3 line 6
     return writeRegisterAndMask(spec::reg::SYSTEM_CONFIG, ~spec::kSystemConfigCommandMask);

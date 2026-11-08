@@ -17,56 +17,104 @@ namespace fake {
 
 using namespace pn5180;
 
-// Simulated ISO/IEC 14443-3 Type A card (single card, no real anticollision).
+inline bool bitAt(const uint8_t* p, size_t b) { return ((p[b / 8] >> (b % 8)) & 1) != 0; }
+inline void putBit(uint8_t* p, size_t b, bool v) {
+    if (v) p[b / 8] = uint8_t(p[b / 8] | (1u << (b % 8)));
+    else p[b / 8] = uint8_t(p[b / 8] & ~(1u << (b % 8)));
+}
+
+// Simulated ISO/IEC 14443-3 Type A card with the PICC state machine
+// (6.3: IDLE, READY, ACTIVE, HALT) and bit-oriented anticollision (6.5.3):
+// the frame must carry exactly the bits its NVB announces, the card compares
+// that many UID CLn bits and answers with the remaining ones.
 struct FakeCardA {
+    enum State { Idle, Ready, Active, Halt };
     uint8_t uid[10] = {};
     uint8_t uidLen = 4;
     uint8_t atqa[2] = {0x44, 0x00};
     uint8_t sak = 0x00;
-    bool halted = false;
-    bool collide = false;      // report a collision in the anticollision answer
+    State state = Idle;
+    bool fromHalt = false;     // woken by WUPA from HALT: errors return to HALT
+    int level = 0;             // cascade level being resolved while READY
     bool corruptBcc = false;
     bool selectSawCrc = true;  // false if a SELECT arrived with TX CRC off
     int levelsSelected = 0;
+    int badFrames = 0;         // anticollision frames whose NVB disagreed with the bits sent
 
-    // Returns true and fills `out` if the card answers.
-    bool respond(const uint8_t* in, size_t len, uint8_t lastBits, bool txCrc, uint8_t* out,
-                 size_t& outLen, uint32_t& extraStatus) {
-        outLen = 0;
-        extraStatus = 0;
-        if (len == 1 && lastBits == 7 && (in[0] == iso14443a::REQA || in[0] == iso14443a::WUPA)) {
-            if (halted && in[0] == iso14443a::REQA) return false;
-            halted = false;
+    bool halted() const { return state == Halt; }
+    void powerOff() { state = Idle; fromHalt = false; }
+    // Transmission error / unexpected frame.  ISO/IEC 14443-3 6.3
+    void error() {
+        if (state == Ready || state == Active) state = fromHalt ? Halt : Idle;
+    }
+
+    // `bits` = bits sent on air (whole bytes + TX last bits). Returns true
+    // and the answer as a bit string (LSB of out[0] first) if the card answers.
+    bool respond(const uint8_t* in, size_t bits, bool txCrc, uint8_t* out, size_t& outBits) {
+        outBits = 0;
+        if (bits == 7 && (in[0] == iso14443a::REQA || in[0] == iso14443a::WUPA)) {
+            if (state == Halt && in[0] == iso14443a::REQA) return false;
+            fromHalt = state == Halt ? true : (state == Idle ? false : fromHalt);
+            state = Ready;
+            level = 0;
             out[0] = atqa[0];
             out[1] = atqa[1];
-            outLen = 2;
+            outBits = 16;
             return true;
         }
-        if (len == 2 && in[0] == iso14443a::HLTA_0 && in[1] == iso14443a::HLTA_1) {
-            halted = true;
+        if (bits == 16 && in[0] == iso14443a::HLTA_0 && in[1] == iso14443a::HLTA_1 && txCrc) {
+            if (state == Active) state = Halt;
+            else error();
             return false;
         }
-        if (len >= 2 && (in[0] == iso14443a::SEL_CL1 || in[0] == iso14443a::SEL_CL2 ||
-                         in[0] == iso14443a::SEL_CL3)) {
-            const int level = (in[0] - iso14443a::SEL_CL1) / 2;
+        if (bits >= 16 && (in[0] == iso14443a::SEL_CL1 || in[0] == iso14443a::SEL_CL2 ||
+                           in[0] == iso14443a::SEL_CL3)) {
+            if (state != Ready) {
+                error();
+                return false;
+            }
+            const int lvl = (in[0] - iso14443a::SEL_CL1) / 2;
             uint8_t cl[5];
-            if (!levelBytes(level, cl)) return false;
-            if (in[1] == iso14443a::NVB_ANTICOLLISION && len == 2) {
-                std::memcpy(out, cl, 5);
-                if (corruptBcc) out[4] ^= 0xFF;
-                outLen = 5;
-                if (collide) extraStatus = spec::rxstatus::COLLISION_DETECTED;
-                return true;
+            if (lvl != level || !levelBytes(lvl, cl)) {
+                error();
+                return false;
             }
-            if (in[1] == iso14443a::NVB_SELECT && len == 7 && std::memcmp(&in[2], cl, 5) == 0) {
+            if (corruptBcc) cl[4] ^= 0xFF;
+            const uint8_t nvb = in[1];
+            const size_t nvbBits = size_t(nvb >> 4) * 8 + (nvb & 0x0F);
+            if ((nvb & 0x0F) > 7 || nvbBits < 16 || nvbBits > 56 || nvbBits != bits) {
+                ++badFrames;  // NVB does not describe the frame: ignored
+                error();
+                return false;
+            }
+            const size_t known = nvbBits - 16;
+            if (nvb == iso14443a::NVB_SELECT) {
                 if (!txCrc) selectSawCrc = false;
-                const bool last = level == lastLevel();
+                if (std::memcmp(&in[2], cl, 5) != 0) {
+                    error();  // another card is selected
+                    return false;
+                }
+                const bool last = lvl == lastLevel();
                 out[0] = last ? sak : iso14443a::SAK_CASCADE_BIT;
-                outLen = 1;
-                levelsSelected = level + 1;
+                outBits = 8;
+                levelsSelected = lvl + 1;
+                if (last) state = Active;
+                else ++level;
                 return true;
             }
+            if (txCrc || known >= 40) {
+                error();
+                return false;
+            }
+            for (size_t b = 0; b < known; ++b) {
+                if (bitAt(&in[2], b) != bitAt(cl, b)) return false;  // not me: stay READY, silent
+            }
+            std::memset(out, 0, 6);
+            for (size_t b = known; b < 40; ++b) putBit(out, b - known, bitAt(cl, b));
+            outBits = 40 - known;
+            return true;
         }
+        error();
         return false;
     }
 
@@ -313,6 +361,7 @@ public:
     int locks = 0;
     bool inFrame = false;
     FakeCardA* card = nullptr;  // card in the field (nullptr = none)
+    FakeCardA* cardsA[4] = {};  // further Type A cards in the field (answers superpose)
     FakeT2T* t2t = nullptr;     // activated Type 2 Tag (takes precedence over `card`)
     // Type A fault injection (for `card`): the next n frames get no answer /
     // a garbled 1-byte answer flagged as a collision.
@@ -513,7 +562,10 @@ private:
             case spec::cmd::RF_OFF:  // DS Table 38, Table 103
                 regs[spec::reg::RF_STATUS] &= ~spec::rfstatus::TX_RF_STATUS;
                 ++rfOffs;
-                if (card != nullptr) card->halted = false;  // POWER-OFF  ISO/IEC 14443-3 6.3
+                if (card != nullptr) card->powerOff();  // POWER-OFF  ISO/IEC 14443-3 6.3
+                for (FakeCardA* a : cardsA) {
+                    if (a != nullptr) a->powerOff();
+                }
                 for (FakeCardV* vc : vcards) {
                     if (vc != nullptr) vc->slot = -1;
                 }
@@ -551,27 +603,79 @@ private:
             sendDataT2T();
             return;
         }
-        if (card == nullptr) return;
+        FakeCardA* field[5] = {card, cardsA[0], cardsA[1], cardsA[2], cardsA[3]};
+        bool any = false;
+        for (FakeCardA* a : field) any = any || a != nullptr;
+        if (!any) return;
         ++framesA;
         if (lastCmd[1] == 7 && lastCmdLen == 3) ++requestsA;  // REQA/WUPA short frame
         if (faultSkipA > 0) {
             --faultSkipA;
-        } else if (muteA > 0) {  // the card misses the frame and drops back to IDLE
+        } else if (muteA > 0) {  // the cards miss the frame and drop back to IDLE
             --muteA;
+            for (FakeCardA* a : field) {
+                if (a != nullptr) a->error();
+            }
             return;
         } else if (garbleA > 0) {  // a noise burst instead of the answer
             --garbleA;
+            for (FakeCardA* a : field) {
+                if (a != nullptr) a->error();
+            }
             rfRx[0] = 0x0B;
-            regs[spec::reg::RX_STATUS] = 1u | spec::rxstatus::COLLISION_DETECTED;
+            regs[spec::reg::RX_STATUS] = 1u | spec::rxstatus::COLLISION_DETECTED |
+                                         (12u << spec::rxstatus::COLL_POS_SHIFT);  // beyond the 1 byte: noise
             regs[spec::reg::IRQ_STATUS] |= spec::irq::RX;
             return;
         }
-        size_t n = 0;
-        uint32_t extra = 0;
+        // Frame on air: whole bytes, the last one cut to TX_LAST_BITS.  DS Table 16
+        const size_t txLen = lastCmdLen - 2;
+        if (txLen == 0) return;
+        const size_t bits = (txLen - 1) * 8 + (lastCmd[1] == 0 ? 8 : lastCmd[1]);
         const bool txCrc = (regs[spec::reg::CRC_TX_CONFIG] & spec::kCrcTxEnable) != 0;
         rxPending = false;  // a new frame replaces any answer still in flight
-        if (card->respond(&lastCmd[2], lastCmdLen - 2, lastCmd[1], txCrc, rfRx, n, extra)) {
-            regs[spec::reg::RX_STATUS] = static_cast<uint32_t>(n) | extra;
+        // Superpose the answers bit by bit (Manchester: differing bits collide).
+        uint8_t ans[5][8] = {};
+        size_t ansBits[5] = {};
+        int answers = 0;
+        size_t respBits = 0;
+        for (int i = 0; i < 5; ++i) {
+            if (field[i] != nullptr && field[i]->respond(&lastCmd[2], bits, txCrc, ans[answers], ansBits[answers])) {
+                if (ansBits[answers] > respBits) respBits = ansBits[answers];
+                ++answers;
+            }
+        }
+        if (answers > 0) {
+            // Receive: first bit stored at RX_BIT_ALIGN of rfRx[0], bits after
+            // the first collision cleared (VALUES_AFTER_COLLISION 0), RX_COLL_POS
+            // = first collided bit incl. the alignment (0-based).  DS Tables 92, 93
+            const uint32_t align = (regs[spec::reg::CRC_RX_CONFIG] & spec::kCrcRxBitAlignMask) >>
+                                   spec::kCrcRxBitAlignShift;
+            std::memset(rfRx, 0, 16);
+            bool coll = false;
+            uint32_t collPos = 0;
+            for (size_t b = 0; b < respBits; ++b) {
+                bool one = false, zero = false;
+                for (int i = 0; i < answers; ++i) {
+                    if (b < ansBits[i]) (bitAt(ans[i], b) ? one : zero) = true;
+                }
+                if (!coll && one && zero) {
+                    coll = true;
+                    collPos = align + uint32_t(b);
+                }
+                putBit(rfRx, align + b, !coll && one);
+            }
+            const size_t total = align + respBits;
+            uint32_t st = static_cast<uint32_t>((total + 7) / 8) |
+                          (uint32_t(total % 8) << spec::rxstatus::NUM_LAST_BITS_SHIFT);
+            if (coll) {
+                // As measured on the reference module: RX_NUM_BYTES stops at
+                // the byte holding the collided bit, RX_NUM_LAST_BITS 0, no
+                // integrity flag (RX_STATUS 0x840003 for COLL_POS 16).
+                st = (collPos / 8 + 1) | spec::rxstatus::COLLISION_DETECTED |
+                     (collPos << spec::rxstatus::COLL_POS_SHIFT);
+            }
+            regs[spec::reg::RX_STATUS] = st;
             if (replyDelayA > 0) {
                 rxPending = true;
                 rxReadyAt = now + replyDelayA;
