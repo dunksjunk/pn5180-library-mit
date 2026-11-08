@@ -4,7 +4,8 @@
 // Reads the UID of an ISO/IEC 14443 Type A card (4, 7 or 10 bytes).
 // Reference test bed:
 //   ESP32-D0WD-V3 dev board + generic PN5180 module
-//   SCK 18, MISO 19, MOSI 23, NSS 16, BUSY 5, RST 17, IRQ not connected.
+//   SCK 18, MISO 19, MOSI 23, NSS 16, BUSY 5, RST 17, IRQ 15 (strapping pin
+//   MTDO; the PN5180 IRQ idles high (active low, EEPROM 0x1A), so boot is unaffected).
 //
 // Every ~500 ms: RF field on, REQA + anticollision/SELECT (retried up to
 // three times after a garbled or missing answer, Iso14443a::activateWithRetry),
@@ -28,7 +29,7 @@ constexpr int8_t PIN_MOSI = 23;
 constexpr int8_t PIN_NSS = 16;
 constexpr int8_t PIN_BUSY = 5;
 constexpr int8_t PIN_RST = 17;
-constexpr int8_t PIN_IRQ = -1;  // not connected: IRQ_STATUS is polled
+constexpr int8_t PIN_IRQ = 15;  // -1 = not connected: IRQ_STATUS is polled instead
 
 // 1 MHz: well below the 7 Mbit/s maximum (DS 11.4.1).
 constexpr uint32_t SPI_CLOCK_HZ = 1000000u;

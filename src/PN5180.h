@@ -8,6 +8,7 @@
 #include "pn5180/Hal.h"
 #include "pn5180/Iso14443a.h"
 #include "pn5180/Iso15693.h"
+#include "pn5180/Lpcd.h"
 #include "pn5180/MemTest.h"
 #include "pn5180/Ndef.h"
 #include "pn5180/NdefTlv.h"

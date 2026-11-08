@@ -3,10 +3,13 @@
 //
 // Basic bring-up sketch for the reference test bed:
 //   ESP32-D0WD-V3 dev board + generic PN5180 module
-//   SCK 18, MISO 19, MOSI 23, NSS 16, BUSY 5, RST 17, IRQ not connected.
+//   SCK 18, MISO 19, MOSI 23, NSS 16, BUSY 5, RST 17, IRQ 15 (strapping pin
+//   MTDO: low at reset only silences the ROM boot log; the PN5180 IRQ idles
+//   inactive, see the polarity printed below from EEPROM 0x1A, DS Table 51).
 //
 // Resets the PN5180, prints the product / firmware / EEPROM versions stored
-// in EEPROM and the IRQ_STATUS register, reporting every error.
+// in EEPROM and the IRQ_STATUS register, then self-tests the IRQ line
+// ("IRQ pin: Ok"), reporting every error.
 
 #include <SPI.h>
 
@@ -21,7 +24,7 @@ constexpr int8_t PIN_MOSI = 23;
 constexpr int8_t PIN_NSS = 16;
 constexpr int8_t PIN_BUSY = 5;
 constexpr int8_t PIN_RST = 17;
-constexpr int8_t PIN_IRQ = -1;  // not connected: IRQ_STATUS is polled
+constexpr int8_t PIN_IRQ = 15;  // -1 = not connected: IRQ_STATUS is polled instead
 
 // 1 MHz: well below the 7 Mbit/s maximum (DS 11.4.1); SPI mode 0 is fixed
 // inside the HAL (DS 11.4.1).
@@ -101,6 +104,19 @@ void setup() {
         if (irq & pn5180::spec::irq::GENERAL_ERROR) {
             Serial.println("  GENERAL_ERROR_IRQ is set");
         }
+    }
+
+    // IRQ line self-test (Timer2 IRQ routed to the pin, then cleared).
+    if (PIN_IRQ >= 0) {
+        Serial.print("  IRQ pin polarity (EEPROM 0x1A bit 0): active ");
+        Serial.println(nfc.irqPinActiveHigh() ? "high" : "low");
+        const pn5180::Status s = nfc.checkIrqPin();
+        check("IRQ pin", s);
+        if (!pn5180::ok(s)) {
+            Serial.println("ERROR: IRQ line does not follow IRQ_STATUS (check the IRQ wire / PIN_IRQ).");
+        }
+    } else {
+        Serial.println("IRQ pin: not connected (polling IRQ_STATUS)");
     }
 }
 

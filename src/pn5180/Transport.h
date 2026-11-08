@@ -45,13 +45,28 @@ public:
     // interleave.
     Status command(const uint8_t* tx, size_t txLen, uint8_t* rx, size_t rxLen);
 
+    // One-frame command that puts the chip into standby / LPCD (SWITCH_MODE,
+    // DS Table 18): steps 0-4 only. Step 5 (wait for BUSY low) is skipped
+    // because the data sheet does not describe BUSY while the chip is in
+    // standby/LPCD, and nothing else may be sent until it wakes.
+    Status commandNoCompletion(const uint8_t* tx, size_t txLen);
+
+    // True while the owning Pn5180 has LPCD/standby armed: every command
+    // returns LowPowerActive without touching NSS, because any NSS activity
+    // ends LPCD (DS 11.8.10 item 3) and no instruction may be sent then
+    // (DS Table 18). Set and cleared only by Pn5180.
+    bool lowPowerGuard() const { return lowPowerGuard_; }
+
 private:
+    friend class Pn5180;
+    void setLowPowerGuard(bool armed) { lowPowerGuard_ = armed; }
     Status waitBusy(bool level);
-    Status frame(const uint8_t* tx, uint8_t* rx, size_t len);
+    Status frame(const uint8_t* tx, uint8_t* rx, size_t len, bool waitDone = true);
 
     Hal& hal_;
     uint32_t busyTimeoutMs_ = 100;  // host policy, see setBusyTimeoutMs()
     bool waitForBusyHigh_ = true;
+    bool lowPowerGuard_ = false;
 };
 
 }  // namespace pn5180

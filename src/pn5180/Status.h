@@ -29,7 +29,9 @@ enum class Status : uint8_t {
     RfActiveError,     // RF_ON refused: external field detected (RF_ACTIVE_ERROR_IRQ)
     RfFieldTimeout,    // RF field did not come on (RF_STATUS.TX_RF_STATUS) in time
     NotFormatted,      // card has no valid NFC Forum Capability Container (not NDEF formatted)
-    MalformedData,     // NDEF message or TLV structure (on the card or in a buffer) is invalid
+    MalformedData,     // NDEF message / TLV structure invalid, or an EEPROM setting holds a reserved encoding
+    IrqPinError,       // the IRQ line does not follow IRQ_STATUS (miswired, stuck, wrong polarity)
+    LowPowerActive,    // chip is in LPCD/standby: no instruction may be sent (DS Table 18)
 };
 
 // Human-readable name for logging. Never returns nullptr.

@@ -72,7 +72,7 @@ A generic ESP32 dev board (ESP32-D0WD-V3, 4 MB flash; Arduino board
 | NSS | 16 | driven manually by the driver |
 | BUSY | 5 | input; GPIO5 is a strapping pin, harmless here |
 | RST | 17 | output |
-| IRQ | (not connected) | the driver polls `IRQ_STATUS` instead |
+| IRQ | 15 | input; GPIO15 (MTDO) is a strapping pin: low at reset only silences the ROM boot log. `PIN_IRQ = -1` falls back to polling `IRQ_STATUS` |
 
 The examples default to this pin map. Every pin can be changed.
 
@@ -82,13 +82,42 @@ The examples default to this pin map. Every pin can be changed.
 |---|---|
 | `src/pn5180/` | portable C++17 core: `Spec.h` (cited constants), `Transport` (BUSY handshake), `Pn5180` (commands), `Hal.h` (platform interface) |
 | `src/PN5180ArduinoHal.*` | Arduino-ESP32 HAL (compiled only when `ARDUINO` is defined) |
-| `examples/Basic/` | reset, version readout, IRQ_STATUS on the reference test bed |
+| `examples/Basic/` | reset, version readout, IRQ_STATUS and the IRQ pin self-test on the reference test bed |
+| `examples/LowPowerDetect/` | low-power card detection (LPCD): sleep until the antenna load changes, then read the cards (needs the IRQ pin) |
 | `examples/ReadUid/`, `examples/ReadUid15693/` | UIDs of ISO/IEC 14443A / ISO/IEC 15693 cards |
 | `examples/MemoryTest/` | non-destructive write test of the last user page/block of Type 2 Tags and ISO/IEC 15693 cards |
 | `examples/NdefDemo/` | prints the NDEF message of Type 2 / Type 5 Tags, writes and verifies a test message, restores the original |
 | `tests/host/` | PC unit test of the core against a fake HAL |
 
 Host test: `g++ -std=c++17 -Wall -Wextra -Werror -Isrc tests/host/test_core.cpp src/pn5180/*.cpp && ./a.out`
+
+## IRQ pin and low-power card detection
+
+If the HAL has an IRQ line, `hardReset()` reads its polarity from EEPROM
+`IRQ_PIN_CONFIG` (0x1A, never written). `transceive()` then waits for RX_IRQ
+on the pin instead of polling `IRQ_STATUS` over SPI. The timeouts and returned
+Status values are the same as with polling. `Pn5180::checkIrqPin()` raises a
+Timer2 IRQ and checks that the pin follows it. It returns `IrqPinError` for a
+stuck, miswired or wrong-polarity line.
+
+`Lpcd` puts the chip into low-power card detection with `SWITCH_MODE`
+(DS 11.8.10, Table 18). `configure()` writes the LPCD EEPROM bytes only where
+they differ and reports how many it wrote, so the count is 0 from the second
+boot on. No instruction may be sent while LPCD runs, so the wake can only be
+seen on the IRQ pin; without a pin, `start()` returns `Unsupported`. After a
+wake the chip is hard-reset. LPCD compares against a reference that is
+measured when it is armed, so it detects a change in antenna load (a card
+added), not a card that was already lying there. `start()` switches the RF
+field off first. The wake-up counter (standby time between two detection
+cycles) is accepted in the range 1..1023 ms: DS Table 21 states 1..2690, but
+DS Figure 40 shows the firmware replacing values above 0x3FF by 0x3FF, so
+larger values are refused with `InvalidArgument`. `readSettings()` returns
+`MalformedData` if EEPROM 0x38 holds a reserved calibration mode (10b/11b);
+`configure()` overwrites it.
+
+While LPCD is armed, `Pn5180::transport()` must not be used: any NSS activity
+ends LPCD (DS 11.8.10). The transport refuses frames with `LowPowerActive`
+until the wake has been handled or the chip is reset.
 
 ## NDEF
 

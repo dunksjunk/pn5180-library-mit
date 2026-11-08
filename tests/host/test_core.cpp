@@ -11,6 +11,7 @@
 
 #include "FakeHal.h"
 #include "pn5180/Iso14443a.h"
+#include "pn5180/Lpcd.h"
 #include "pn5180/MemTest.h"
 #include "pn5180/Ndef.h"
 #include "pn5180/NdefTlv.h"
@@ -788,6 +789,7 @@ void testMemTestRetry() {
 }
 
 #include "NdefTests.inc"
+#include "IrqLpcdTests.inc"
 
 void testRecoveryPolicy() {
     EXPECT(requiresRecovery(Status::BusyTimeout));
@@ -804,6 +806,8 @@ void testRecoveryPolicy() {
     EXPECT(!requiresRecovery(Status::CardError));
     EXPECT(!requiresRecovery(Status::RfActiveError));
     EXPECT(!requiresRecovery(Status::InvalidArgument));
+    EXPECT(requiresRecovery(Status::IrqPinError));
+    EXPECT(!requiresRecovery(Status::LowPowerActive));
 }
 
 }  // namespace
@@ -817,6 +821,9 @@ int main() {
     testType2Tag();
     testIso15693Memory();
     testNdef();
+    testIrqPin();
+    testIrqReview();
+    testLpcd();
     if (failures == 0) {
         std::printf("all tests passed\n");
         return 0;

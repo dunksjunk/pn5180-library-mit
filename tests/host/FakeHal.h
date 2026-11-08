@@ -322,6 +322,47 @@ public:
     int framesA = 0;    // Type A frames sent to `card`
     int requestsA = 0;  // of those, REQA/WUPA short frames
     int rfOffs = 0;     // RF_OFF commands
+    // `card` answers become visible (RX_IRQ) this many fake ms after
+    // SEND_DATA; 0 = at once (already seen by SEND_DATA's error check).
+    uint32_t replyDelayA = 0;
+
+    // IRQ line model: level = any IRQ_STATUS bit that IRQ_ENABLE routes (or
+    // a non-maskable one, DS 11.3.2.2), polarity from EEPROM 0x1A bit 0.
+    bool irqWired = false;
+    int irqStuck = -1;           // 0 / 1: line stuck at that level, -1: works
+    int irqReads = 0;            // irq() samples
+    bool lowPower = false;       // SWITCH_MODE LPCD/standby active
+    int framesInLowPower = 0;    // frames sent while lowPower (must stay 0)
+    uint8_t lastSwitchMode[8] = {};
+    size_t lastSwitchModeLen = 0;
+    int eepromBytesWritten = 0;
+    // RX_IRQ (with RX_STATUS = 0 bytes) appears when IRQ_STATUS is read over
+    // SPI at or after this fake time - not visible on the pin before that
+    // read. 0 = off.
+    uint32_t rxOnStatusReadAt = 0;
+    // Timer2 model (DS Table 87, 90): TIMER2_IRQ is raised only once the
+    // programmed reload has elapsed in fake time, and only for the reload
+    // the IRQ self-test is specified to use (spec::timer::kSelfTestReload,
+    // 100 us -> due 1 fake ms after the start). Fault injection:
+    uint32_t timer2ReloadOffset = 0;  // added to every TIMER2_RELOAD write
+    bool timer2IgnoreStart = false;   // T2_START_NOW has no effect
+    // LPCD detection: the chip raises LPCD_IRQ and returns to normal mode.
+    void lpcdWake() {
+        lowPower = false;
+        regs[spec::reg::IRQ_STATUS] |= spec::irq::LPCD;
+    }
+
+    bool hasIrq() const override { return irqWired; }
+    bool irq() override {
+        ++irqReads;
+        if (irqStuck >= 0) return irqStuck == 1;
+        promoteRx();
+        promoteTimer2();
+        const uint32_t routed = regs[spec::reg::IRQ_ENABLE] | spec::irq::NON_MASKABLE;
+        const bool pending = (regs[spec::reg::IRQ_STATUS] & routed) != 0;
+        const bool activeHigh = (eeprom[spec::eeprom::IRQ_PIN_CONFIG] & 1) != 0;
+        return activeHigh ? pending : !pending;
+    }
 
     Status begin() override { return Status::Ok; }
     Status beginFrame() override {
@@ -329,6 +370,10 @@ public:
         return Status::Ok;
     }
     Status transfer(const uint8_t* tx, uint8_t* rx, size_t len, uint8_t filler) override {
+        if (lowPower) {  // NSS activity ends LPCD (DS 11.8.10) - a driver bug
+            ++framesInLowPower;
+            lowPower = false;
+        }
         if (tx != nullptr) {  // instruction frame
             std::memcpy(lastCmd, tx, len);
             lastCmdLen = len;
@@ -345,7 +390,13 @@ public:
         ++frames;
     }
     void setReset(bool asserted) override {
-        if (!asserted) regs[spec::reg::IRQ_STATUS] = spec::irq::IDLE;  // boot done
+        if (!asserted) {
+            regs[spec::reg::IRQ_STATUS] = spec::irq::IDLE;  // boot done
+            regs[spec::reg::IRQ_ENABLE] = 0;
+            regs[spec::reg::TIMER2_CONFIG] = 0;
+            timer2Running = false;
+            lowPower = false;
+        }
     }
     bool busy() override {
         if (stuckBusy) return true;
@@ -373,6 +424,22 @@ private:
     uint8_t rsp[512] = {};
     size_t rspLen = 0;
     uint8_t rfRx[512] = {};
+    bool timer2Running = false;
+    uint32_t timer2DueAt = 0;
+
+    void promoteTimer2() {
+        if (timer2Running && static_cast<int32_t>(now - timer2DueAt) >= 0) {
+            timer2Running = false;
+            regs[spec::reg::IRQ_STATUS] |= spec::irq::TIMER2;
+        }
+    }
+
+    void promoteRx() {
+        if (rxPending && static_cast<int32_t>(now - rxReadyAt) >= 0) {
+            rxPending = false;
+            regs[spec::reg::IRQ_STATUS] |= spec::irq::RX;
+        }
+    }
 
     void execute() {
         const uint8_t c = lastCmd[0];
@@ -388,16 +455,40 @@ private:
         switch (c) {
             case spec::cmd::WRITE_REGISTER:
                 if (lastCmd[1] == spec::reg::IRQ_CLEAR) regs[spec::reg::IRQ_STATUS] &= ~v;
+                else if (lastCmd[1] == spec::reg::TIMER2_RELOAD) regs[lastCmd[1]] = v + timer2ReloadOffset;
                 else regs[lastCmd[1]] = v;
+                if (lastCmd[1] == spec::reg::TIMER2_CONFIG) {
+                    timer2Running = false;  // any write stops / restarts the timer
+                    const uint32_t startBits = spec::timer::ENABLE | spec::timer::START_NOW;
+                    if ((v & startBits) == startBits && !timer2IgnoreStart &&
+                        regs[spec::reg::TIMER2_RELOAD] == spec::timer::kSelfTestReload) {
+                        timer2Running = true;
+                        timer2DueAt = now + 1;  // 100 us, rounded up to the 1 ms fake tick
+                    }
+                }
+                break;
+            case spec::cmd::SWITCH_MODE:  // DS Table 18
+                std::memcpy(lastSwitchMode, lastCmd, lastCmdLen < 8 ? lastCmdLen : 8);
+                lastSwitchModeLen = lastCmdLen;
+                lowPower = true;
                 break;
             case spec::cmd::WRITE_REGISTER_OR_MASK: regs[lastCmd[1]] |= v; break;
             case spec::cmd::WRITE_REGISTER_AND_MASK: regs[lastCmd[1]] &= v; break;
             case spec::cmd::READ_REGISTER:
-                if (rxPending && static_cast<int32_t>(now - rxReadyAt) >= 0) {
-                    rxPending = false;
+                promoteRx();
+                promoteTimer2();
+                if (lastCmd[1] == spec::reg::IRQ_STATUS && rxOnStatusReadAt != 0 &&
+                    static_cast<int32_t>(now - rxOnStatusReadAt) >= 0) {
+                    rxOnStatusReadAt = 0;
+                    regs[spec::reg::RX_STATUS] = 0;
                     regs[spec::reg::IRQ_STATUS] |= spec::irq::RX;
                 }
                 v = regs[lastCmd[1]];
+                // Auto clear on read.  DS Table 51 (0x1A bit 1)
+                if (lastCmd[1] == spec::reg::IRQ_STATUS &&
+                    (eeprom[spec::eeprom::IRQ_PIN_CONFIG] & spec::eeprom::kIrqPinAutoClear) != 0) {
+                    regs[spec::reg::IRQ_STATUS] = 0;
+                }
                 for (int i = 0; i < 4; ++i) rsp[i] = uint8_t(v >> (8 * i));
                 rspLen = 4;
                 break;
@@ -407,6 +498,7 @@ private:
                 break;
             case spec::cmd::WRITE_EEPROM:
                 std::memcpy(&eeprom[lastCmd[1]], &lastCmd[2], lastCmdLen - 2);
+                eepromBytesWritten += static_cast<int>(lastCmdLen - 2);
                 break;
             case spec::cmd::SEND_DATA: sendData(); break;
             case spec::cmd::LOAD_RF_CONFIG:  // DS Table 31
@@ -477,8 +569,14 @@ private:
         size_t n = 0;
         uint32_t extra = 0;
         const bool txCrc = (regs[spec::reg::CRC_TX_CONFIG] & spec::kCrcTxEnable) != 0;
+        rxPending = false;  // a new frame replaces any answer still in flight
         if (card->respond(&lastCmd[2], lastCmdLen - 2, lastCmd[1], txCrc, rfRx, n, extra)) {
             regs[spec::reg::RX_STATUS] = static_cast<uint32_t>(n) | extra;
+            if (replyDelayA > 0) {
+                rxPending = true;
+                rxReadyAt = now + replyDelayA;
+                return;
+            }
             regs[spec::reg::IRQ_STATUS] |= spec::irq::RX;
         }
     }

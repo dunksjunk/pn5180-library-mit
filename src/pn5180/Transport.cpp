@@ -45,7 +45,7 @@ Status Transport::waitBusy(bool level) {
     }
 }
 
-Status Transport::frame(const uint8_t* tx, uint8_t* rx, size_t len) {
+Status Transport::frame(const uint8_t* tx, uint8_t* rx, size_t len, bool waitDone) {
     Status s = waitBusy(false);  // step 0
     if (!ok(s)) {
         return s;
@@ -60,10 +60,21 @@ Status Transport::frame(const uint8_t* tx, uint8_t* rx, size_t len) {
         s = waitBusy(true);  // step 3
     }
     hal_.endFrame();  // step 4 (NSS high, bus released) - always paired
-    if (!ok(s)) {
+    if (!ok(s) || !waitDone) {
         return s;
     }
     return waitBusy(false);  // step 5
+}
+
+Status Transport::commandNoCompletion(const uint8_t* tx, size_t txLen) {
+    if (tx == nullptr || txLen == 0) {
+        return Status::InvalidArgument;
+    }
+    if (lowPowerGuard_) {
+        return Status::LowPowerActive;  // DS Table 18, DS 11.8.10
+    }
+    LockGuard guard(hal_);
+    return frame(tx, nullptr, txLen, false);
 }
 
 Status Transport::command(const uint8_t* tx, size_t txLen) {
@@ -73,6 +84,9 @@ Status Transport::command(const uint8_t* tx, size_t txLen) {
 Status Transport::command(const uint8_t* tx, size_t txLen, uint8_t* rx, size_t rxLen) {
     if (tx == nullptr || txLen == 0 || (rx == nullptr && rxLen != 0)) {
         return Status::InvalidArgument;
+    }
+    if (lowPowerGuard_) {
+        return Status::LowPowerActive;  // DS Table 18, DS 11.8.10
     }
 
     LockGuard guard(hal_);

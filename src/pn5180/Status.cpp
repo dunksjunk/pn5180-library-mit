@@ -26,6 +26,8 @@ const char* statusToString(Status s) {
         case Status::RfFieldTimeout:  return "RfFieldTimeout";
         case Status::NotFormatted:    return "NotFormatted";
         case Status::MalformedData:   return "MalformedData";
+        case Status::IrqPinError:     return "IrqPinError";
+        case Status::LowPowerActive:  return "LowPowerActive";
     }
     return "Unknown";
 }
@@ -40,7 +42,12 @@ bool requiresRecovery(Status s) {
         case Status::HalError:
         case Status::ChipError:
         case Status::RfFieldTimeout:
+        // The IRQ line disagrees with IRQ_STATUS: the wait result is unreliable.
+        case Status::IrqPinError:
             return true;
+        // LPCD/standby is armed: leave it via Lpcd::waitForWake()/cancel(),
+        // which reset the chip; the caller must not reset behind its back.
+        case Status::LowPowerActive:
         // Success, caller errors and guarded operations: chip state is fine.
         case Status::Ok:
         case Status::InvalidArgument:

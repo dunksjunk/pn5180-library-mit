@@ -4,7 +4,8 @@
 // Reads the UIDs of the ISO/IEC 15693 (vicinity) cards in the field with a
 // 16-slot INVENTORY. Reference test bed:
 //   ESP32-D0WD-V3 dev board + generic PN5180 module
-//   SCK 18, MISO 19, MOSI 23, NSS 16, BUSY 5, RST 17, IRQ not connected.
+//   SCK 18, MISO 19, MOSI 23, NSS 16, BUSY 5, RST 17, IRQ 15 (strapping pin
+//   MTDO; the PN5180 IRQ idles high (active low, EEPROM 0x1A), so boot is unaffected).
 //
 // Every ~500 ms: RF field on, 16-slot INVENTORY, one line per card
 //   ISO15693 UID: E0 04 01 50 12 34 56 78  DSFID: 00
@@ -26,7 +27,7 @@ constexpr int8_t PIN_MOSI = 23;
 constexpr int8_t PIN_NSS = 16;
 constexpr int8_t PIN_BUSY = 5;
 constexpr int8_t PIN_RST = 17;
-constexpr int8_t PIN_IRQ = -1;  // not connected: IRQ_STATUS is polled
+constexpr int8_t PIN_IRQ = 15;  // -1 = not connected: IRQ_STATUS is polled instead
 
 // 1 MHz: well below the 7 Mbit/s maximum (DS 11.4.1).
 constexpr uint32_t SPI_CLOCK_HZ = 1000000u;

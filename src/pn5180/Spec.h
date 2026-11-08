@@ -50,7 +50,23 @@ constexpr uint8_t READ_DATA = 0x0A;                // DS Table 5, Table 17; AN12
 constexpr uint8_t LOAD_RF_CONFIG = 0x11;           // DS Table 5, Table 31; AN12650 3.6
 constexpr uint8_t RF_ON = 0x16;                    // DS Table 5, Table 37; AN12650 3.7
 constexpr uint8_t RF_OFF = 0x17;                   // DS Table 5, Table 38; AN12650 3.8
+constexpr uint8_t SWITCH_MODE = 0x0B;              // DS Table 5, Table 18
 }  // namespace cmd
+
+// SWITCH_MODE parameters (DS Table 18 - Table 21)
+namespace switchmode {
+constexpr uint8_t kModeStandby = 0;   // DS Table 18 condition ("mode ... 0 (Standby)")
+constexpr uint8_t kModeLpcd = 1;      // DS Table 18 condition ("mode ... 1 (LPCD)")
+// Wake-up counter in ms. DS Table 18 condition / Table 21 state "range from
+// 1 to 2690, inclusive", but DS Figure 40 shows the LPCD firmware replacing
+// values <= 0 or > 0x3FF by 0x3FF. The driver accepts only the range on
+// which both agree, 1..1023 (0x3FF), so the value sent is the value used.
+constexpr uint16_t kWakeupCounterMinMs = 1;      // DS Table 21
+constexpr uint16_t kWakeupCounterMaxMs = 0x3FF;  // DS Figure 40 (Table 21: 2690)
+// The data sheet does not state the byte order of the 2-byte wake-up counter
+// (DS Table 21). The host interface transfers multi-byte values little
+// endian (DS 11.4.3.1), so the counter is sent LSB first.
+}  // namespace switchmode
 
 // Command parameter limits
 constexpr size_t kRegisterValueBytes = 4;         // 32-bit, little endian      DS 11.4.3.1, Table 6
@@ -255,7 +271,28 @@ constexpr uint32_t GENERAL_ERROR = 1u << 17;   // General error (command excepti
 constexpr uint32_t HV_ERROR = 1u << 18;        // EEPROM failure during programming
 constexpr uint32_t LPCD = 1u << 19;            // Low-power card detection
 constexpr uint32_t ALL = 0x000FFFFFu;          // bits 19:0; 31:20 are RFU
+// Always routed to the IRQ pin, whatever IRQ_ENABLE holds.   DS 11.3.2.2, Table 76 bits 19:17
+constexpr uint32_t NON_MASKABLE = LPCD | HV_ERROR | GENERAL_ERROR;
+// IRQ_ENABLE bits the host can set (bits 16:0, R/W).        DS Table 76
+constexpr uint32_t ENABLE_WRITABLE = 0x0001FFFFu;
 }  // namespace irq
+
+// TIMER2_CONFIG bits used by the IRQ pin self-test.           DS Table 90
+namespace timer {
+constexpr uint32_t ENABLE = 1u << 0;     // T2_ENABLE                DS Table 90 bit 0
+constexpr uint32_t START_NOW = 1u << 6;  // T2_START_NOW             DS Table 90 bit 6
+// TIMER2_RELOAD 1356 at the 13.56 MHz CLIF clock (prescaler disabled,
+// T2_MODE_SEL = 0) = 100 us.                                   DS Table 87, Table 90 bit 2
+constexpr uint32_t kSelfTestReload = 1356u;
+}  // namespace timer
+
+// AGC_REF_CONFIG: reading it without a prior write starts an LPCD
+// calibration (AGC_GEAR bits 13:10, AGC_VALUE bits 9:0).        DS Table 112
+namespace agcref {
+constexpr unsigned GEAR_SHIFT = 10;
+constexpr uint32_t GEAR_MASK = 0xFu;
+constexpr uint32_t VALUE_MASK = 0x3FFu;
+}  // namespace agcref
 
 // --------------------------------------------------------------------------
 // EEPROM map (DS 11.5.2 Table 51)
@@ -274,6 +311,22 @@ constexpr size_t kVersionMajorOffset = 1;
 // 0x00..0x15 are documented read-only (Access "R"); the first RW entry is
 // 0x16 IDLE_IRQ_AFTER_BOOT.                                 DS Table 51
 constexpr uint8_t kFirstWritableAddress = 0x16;
+
+// IRQ_PIN_CONFIG (1 byte, RW).                               DS Table 51, DS 11.3.2.1
+constexpr uint8_t IRQ_PIN_CONFIG = 0x1A;
+constexpr uint8_t kIrqPinActiveHigh = 1u << 0;   // bit 0: 0 = active low, 1 = active high
+constexpr uint8_t kIrqPinAutoClear = 1u << 1;    // bit 1: 1 = auto clear on IRQ_STATUS read
+
+// Low-power card detection.                                  DS Table 51, Table 73
+constexpr uint8_t LPCD_REFERENCE_VALUE = 0x34;     // bits 3:0 AGC gear (auto calibration), 7:4 RFU
+constexpr uint8_t kLpcdGearMask = 0x0Fu;
+constexpr uint8_t LPCD_FIELD_ON_TIME = 0x36;       // RF-on time for the AGC measurement, x 8 us
+constexpr uint32_t kLpcdFieldOnTimeUnitUs = 8u;
+constexpr uint8_t LPCD_THRESHOLD = 0x37;           // wake if (reference AGC - actual AGC) > threshold
+constexpr uint8_t LPCD_REFVAL_GPO_CONTROL = 0x38;  // bits 1:0 LPCD mode, bits 4:2 GPO control
+constexpr uint8_t kLpcdModeMask = 0x03u;
+constexpr uint8_t kLpcdModeAutoCalibration = 0x00u;  // 00b                   DS Table 73
+constexpr uint8_t kLpcdModeSelfCalibration = 0x01u;  // 01b (10b/11b RFU)     DS Table 73
 }  // namespace eeprom
 
 }  // namespace spec

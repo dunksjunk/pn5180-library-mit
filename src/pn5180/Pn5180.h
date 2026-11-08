@@ -106,8 +106,10 @@ public:
     Status idle();
 
     // One RF exchange (DS Table 15 precondition; AN12650 4.1.1 lines 5-9):
-    // IDLE, clear IRQs, COMMAND = Transceive, SEND_DATA, then poll IRQ_STATUS
-    // for RX_IRQ for up to `timeoutMs`, read RX_STATUS and READ_DATA.
+    // IDLE, clear IRQs, COMMAND = Transceive, SEND_DATA, then wait up to
+    // `timeoutMs` for RX_IRQ - on the IRQ pin when one is in use
+    // (irqPinInUse(); IRQ_ENABLE routes RX_IRQ to it, DS Table 76), otherwise
+    // by polling IRQ_STATUS over SPI - and read RX_STATUS and READ_DATA.
     //   txLastBits: valid bits of the last tx byte, 0 = all 8 (DS Table 16)
     //   rx/rxCap:   receive buffer (may be nullptr if rxCap == 0)
     //   rxLen:      bytes received (also set on Collision/IntegrityError/
@@ -122,6 +124,54 @@ public:
     // RX_STATUS read by the last transceive(); 0 if it received no frame.
     uint32_t lastRxStatus() const { return lastRxStatus_; }
 
+    // ---- IRQ pin (optional; Hal::hasIrq()) --------------------------------
+    // When the HAL has an IRQ line, hardReset() reads IRQ_PIN_CONFIG (EEPROM
+    // 0x1A, DS Table 51) for the pin polarity, and transceive() then waits
+    // for RX_IRQ on the pin (IRQ_ENABLE routes only RX_IRQ, DS Table 76;
+    // GENERAL_ERROR is non-maskable, DS 11.3.2.2) instead of polling
+    // IRQ_STATUS over SPI. Timeouts, the IRQ clear sequence and the returned
+    // Status values are identical to the polling path; the result is always
+    // read from IRQ_STATUS / RX_STATUS. If RX_IRQ is found set in IRQ_STATUS
+    // after a timeout although the pin never became active, IrqPinError is
+    // returned instead of NoResponse. Never rewrites the EEPROM.
+    bool irqPinInUse() const { return hal_.hasIrq() && irqConfigKnown_ && irqPinEnabled_; }
+    // Force polling even when the HAL has an IRQ line (default: use the pin).
+    void setUseIrqPin(bool enabled) { irqPinEnabled_ = enabled; }
+    // IRQ_PIN_CONFIG as read by hardReset() / checkIrqPin(); valid when
+    // irqPinConfigKnown().
+    bool irqPinConfigKnown() const { return irqConfigKnown_; }
+    bool irqPinActiveHigh() const { return irqActiveHigh_; }
+    // Current level of the IRQ line translated to "an enabled IRQ is pending".
+    bool irqPinActive();
+
+    // Self-test of the IRQ line: with IRQ_ENABLE routing only TIMER2_IRQ the
+    // pin must be inactive, become active when Timer2 expires (100 us,
+    // DS Table 87, 90) and inactive again after IRQ_CLEAR (DS 11.3.2.1).
+    // Returns Unsupported without an IRQ line, IrqPinError if the pin is
+    // stuck / miswired / of the wrong polarity, IrqTimeout if TIMER2_IRQ
+    // never appears in IRQ_STATUS. Leaves Timer2 stopped and IRQ_ENABLE = 0.
+    Status checkIrqPin();
+
+    // IRQ_ENABLE write (bits 16:0, DS Table 76), skipped if the cached value
+    // already matches. hardReset() resets the cache to the IRQ_ENABLE reset
+    // value; any writeRegister*() on IRQ_ENABLE invalidates it.
+    Status setIrqEnable(uint32_t mask);
+
+    // ---- Low-power modes (used by Lpcd) ----------------------------------
+    // SWITCH_MODE LPCD (DS Table 18, Table 21). After success the chip must
+    // not receive any instruction (DS Table 18); every command returns
+    // LowPowerActive until leaveLowPower() or hardReset().
+    Status switchModeLpcd(uint16_t wakeupCounterMs);
+    bool lowPowerActive() const { return lowPower_; }
+    // To be called once the IRQ pin signalled the end of LPCD/standby (normal
+    // mode re-entered by the chip, DS Table 18 description): reads and
+    // clears IRQ_STATUS into `irqStatus`, then hard-resets the chip so all
+    // registers are in their defined default state (DS 11.8.10: register
+    // configurations are not restored after wake-up).
+    Status leaveLowPower(uint32_t& irqStatus);
+
+    Hal& hal() { return hal_; }
+
     // Convenience helpers.
     // IRQ_STATUS as read now, merged with flags observed by the command error
     // check since the last call (see setCommandErrorCheck()).
@@ -130,13 +180,25 @@ public:
     // Reads the versions; also records the firmware version for gating.
     Status readVersions(Versions& out);
 
+    // Raw host-interface access, bypassing every check of this class. Must
+    // not be used while lowPowerActive(): any NSS activity ends LPCD
+    // (DS 11.8.10 item 3) without this object noticing. The Transport
+    // therefore refuses frames with LowPowerActive while LPCD/standby is
+    // armed (until leaveLowPower() or hardReset()).
     Transport& transport() { return transport_; }
 
     // Host delay through the HAL (for protocol layers built on this driver).
     void delayMs(uint32_t ms) { hal_.delayMs(ms); }
 
 private:
-    Status checkReady() const { return begun_ ? Status::Ok : Status::NotInitialized; }
+    Status checkReady() const {
+        return !begun_ ? Status::NotInitialized : (lowPower_ ? Status::LowPowerActive : Status::Ok);
+    }
+    Status readIrqPinConfig();
+    // Waits until IRQ_STATUS has a bit of `mask` or GENERAL_ERROR (returned
+    // in `irq`), on the IRQ pin if in use, else by polling. IrqTimeout after
+    // `timeoutMs`; IrqPinError if the pin missed a set bit.
+    Status waitIrq(uint32_t mask, uint32_t timeoutMs, uint32_t& irq);
     Status checkRegister(uint8_t reg, bool write) const;
     Status registerCommand(uint8_t command, uint8_t reg, uint32_t value);
     Status rawWriteRegister(uint8_t command, uint8_t reg, uint32_t value);
@@ -153,6 +215,12 @@ private:
     uint32_t lastRxStatus_ = 0;
     bool fwKnown_ = false;
     Version fw_;
+    bool irqConfigKnown_ = false;
+    bool irqActiveHigh_ = false;
+    bool irqPinEnabled_ = true;
+    bool irqEnableKnown_ = false;
+    uint32_t irqEnable_ = 0;
+    bool lowPower_ = false;
     // Largest command frame: SEND_DATA = code + valid-bits + 260 data bytes.
     uint8_t txBuf_[2 + spec::kSendDataMaxBytes] = {};
 };
