@@ -87,9 +87,11 @@ closed-source products.
 This project is a **full clean-room rewrite** so that it can be offered under
 the permissive MIT license instead:
 
-- **The only technical sources are NXP's public documents**, chiefly the
-  *PN5180A0xx/C3,C4 product data sheet* (Rev. 4.3) and application note
-  *AN12650 - Using the PN5180 without library*.
+- **The only technical sources for the chip are NXP's public documents**,
+  chiefly the *PN5180A0xx/C3,C4 product data sheet* (Rev. 4.3) and
+  application note *AN12650 - Using the PN5180 without library*. The card
+  side (ISO/IEC 14443-3, ISO/IEC 15693-3, NFC Forum Type 2 / Type 5 Tag,
+  NDEF, RTD) comes from those public standards, cited by clause.
 - **No code, structure or naming has been copied, ported or adapted from any
   existing PN5180 library.** Contributors must not consult those
   implementations while working on this codebase.
@@ -150,7 +152,9 @@ The examples default to this pin map. Every pin can be changed.
 
 | Path | Contents |
 |---|---|
-| `src/pn5180/` | portable C++17 core: `Spec.h` (cited constants), `Transport` (BUSY handshake), `Pn5180` (commands), `Hal.h` (platform interface) |
+| `src/PN5180.h` | umbrella header of the portable core; Arduino sketches also include `PN5180ArduinoHal.h` for `ArduinoHal` / `ArduinoPins` |
+| `src/pn5180/` | portable C++17 core: `Hal.h` (platform interface), `Spec.h` (cited constants), `Transport` (BUSY handshake), `Pn5180` (chip commands, IRQ pin), `Status` |
+| `src/pn5180/` (protocols) | `Iso14443a`, `Iso15693` (card activation), `Type2Tag`, `Type5Tag` (tag memory), `MemTest` (non-destructive memory test), `Ndef`, `NdefTlv` (NDEF messages and their TLV), `Lpcd` (low-power card detection) |
 | `src/PN5180ArduinoHal.*` | Arduino-ESP32 HAL (compiled only when `ARDUINO` is defined) |
 | `examples/Basic/` | reset, version readout, IRQ_STATUS and the IRQ pin self-test on the reference test bed |
 | `examples/LowPowerDetect/` | low-power card detection (LPCD): sleep until the antenna load changes, then read the cards (needs the IRQ pin) |
@@ -287,15 +291,20 @@ field off).
 `auto_dev.py` is the closed-loop development harness used to build this
 library. On each iteration it:
 
-1. compiles every example for every target board with all warnings enabled;
-2. once that build is clean, collects review comments from Sourcery;
+1. compiles every example for every target board with all warnings enabled
+   and runs the gate commands given with `--gate` (for this project: the
+   host unit tests and the hardware-in-the-loop checks on the reference test
+   bed);
+2. once no gate reports an error, collects review comments from Sourcery
+   (remaining warnings are still handed to the author as findings);
 3. has Claude Code fix each finding, or dispute it with a reason a human then
    reviews;
 4. commits a checkpoint.
 
 The harness gives the coding agent no web access and limits its sources to
-the NXP documents, so the clean-room rule above is enforced by the tool and
-not left to good intentions. Run `python auto_dev.py --help` for usage.
+the NXP documents (plus the public ISO/IEC and NFC Forum standards for the
+card side), so the clean-room rule above is enforced by the tool and not
+left to good intentions. Run `python auto_dev.py --help` for usage.
 
 The NXP PDFs are not redistributed in this repository. Download them from
 [nxp.com](https://www.nxp.com/) and place them in `.specs/`.
