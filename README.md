@@ -309,6 +309,13 @@ left to good intentions. Run `python auto_dev.py --help` for usage.
 The NXP PDFs are not redistributed in this repository. Download them from
 [nxp.com](https://www.nxp.com/) and place them in `.specs/`.
 
+## Security
+
+Please report vulnerabilities privately, as described in
+[SECURITY.md](https://github.com/dunksjunk/pn5180-library-mit/blob/main/SECURITY.md). That file also lists what the library does
+**not** protect against. For example, a card UID is not a secret and must
+not be used alone for access control.
+
 ## License
 
 [MIT](https://github.com/dunksjunk/pn5180-library-mit/blob/main/LICENSE) © 2026 Rich Dunkel

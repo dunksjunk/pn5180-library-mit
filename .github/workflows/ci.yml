@@ -17,12 +17,15 @@ jobs:
   host-tests:
     name: host tests (${{ matrix.cxx }})
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
         cxx: [g++, clang++]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false  # no token left in .git/config
       - name: Build
         run: |
           mkdir -p build/host
@@ -35,8 +38,11 @@ jobs:
   sanitizers:
     name: host tests (ASan + UBSan)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false  # no token left in .git/config
       - name: Build
         run: |
           mkdir -p build/host
@@ -52,8 +58,11 @@ jobs:
   manifests:
     name: manifest check
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false  # no token left in .git/config
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
         with:
           python-version: "3.12"
@@ -63,8 +72,11 @@ jobs:
   docs:
     name: API docs (Doxygen)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false  # no token left in .git/config
       - name: Install Doxygen
         run: sudo apt-get update && sudo apt-get install -y doxygen
       - name: Build docs (warnings are errors)
