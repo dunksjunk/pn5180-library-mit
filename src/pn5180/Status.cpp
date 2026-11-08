@@ -24,6 +24,8 @@ const char* statusToString(Status s) {
         case Status::CardError:       return "CardError";
         case Status::RfActiveError:   return "RfActiveError";
         case Status::RfFieldTimeout:  return "RfFieldTimeout";
+        case Status::NotFormatted:    return "NotFormatted";
+        case Status::MalformedData:   return "MalformedData";
     }
     return "Unknown";
 }
@@ -53,6 +55,9 @@ bool requiresRecovery(Status s) {
         case Status::ProtocolError:
         case Status::CardError:
         case Status::RfActiveError:
+        // Card content results: the card is not NDEF formatted / holds bad data.
+        case Status::NotFormatted:
+        case Status::MalformedData:
             return false;
     }
     return true;  // out-of-range value: treat as unknown device state

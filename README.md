@@ -85,15 +85,48 @@ The examples default to this pin map. Every pin can be changed.
 | `examples/Basic/` | reset, version readout, IRQ_STATUS on the reference test bed |
 | `examples/ReadUid/`, `examples/ReadUid15693/` | UIDs of ISO/IEC 14443A / ISO/IEC 15693 cards |
 | `examples/MemoryTest/` | non-destructive write test of the last user page/block of Type 2 Tags and ISO/IEC 15693 cards |
+| `examples/NdefDemo/` | prints the NDEF message of Type 2 / Type 5 Tags, writes and verifies a test message, restores the original |
 | `tests/host/` | PC unit test of the core against a fake HAL |
 
 Host test: `g++ -std=c++17 -Wall -Wextra -Werror -Isrc tests/host/test_core.cpp src/pn5180/*.cpp && ./a.out`
 
+## NDEF
+
+Written from the public NFC Forum specifications (NDEF 1.0, RTD URI, RTD
+Text, Type 2 Tag and Type 5 Tag technical specifications); no vendor tag
+data sheets.
+
+- `Ndef.h`: `NdefParser` walks a raw message record by record without
+  reading outside the buffer (malformed data -> `MalformedData`, chunked
+  records -> `Unsupported`); `NdefBuilder` appends records into a caller
+  buffer (MB/ME, short/long records, `addUri()` with the longest URI
+  prefix code, `addText()`); `decodeNdefUri()` / `decodeNdefText()`.
+- `NdefTlv.h`: finds the NDEF Message TLV (skips NULL, Lock/Memory Control
+  and proprietary TLVs, 1- and 3-byte lengths) in any `NdefMemory` and
+  writes a message as NDEF TLV + Terminator: length 0 first, the real
+  length last, so an interrupted write leaves an empty but valid TLV.
+  `backupNdefArea()` / `restoreNdefArea()` save and restore the touched units.
+- `Type2Tag::readNdef()/writeNdef()` (CC in page 3; pages 0-3 are never
+  written; a read-only CC refuses writes) and `Type5Tag` for ISO/IEC 15693
+  (CC in block 0, 4- or 8-byte CC, block geometry from GET SYSTEM
+  INFORMATION). A card without a valid CC is reported as `NotFormatted`;
+  the library never formats a card on its own.
+
+```cpp
+uint8_t msg[128];
+pn5180::NdefBuilder b(msg, sizeof(msg));
+b.addUri("https://example.com/");
+b.addText("hello", "en");
+pn5180::Type2Tag tag(nfc);             // after Iso14443a activation
+pn5180::Status s = tag.writeNdef(b.data(), b.size());
+```
+
 ## Thread safety
 
 The driver is not thread-safe. A `Pn5180` object and the protocol objects
-built on it (`Iso14443a`, `Iso15693`, `Type2Tag`, the `MemTest` helpers)
-belong to one owner. A protocol operation
+built on it (`Iso14443a`, `Iso15693`, `Type2Tag`, `Type5Tag`, the `MemTest`
+helpers) belong to one owner; the NDEF parser/builder only touch caller
+buffers. A protocol operation
 issues several chip commands and temporarily changes chip registers, so two
 tasks must never drive the same chip at the same time. If several tasks need
 the reader, hold your own mutex around each complete operation (field on ...

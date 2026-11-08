@@ -27,6 +27,31 @@ ROOT = Path(__file__).resolve().parent.parent
 CRASH = r"Guru Meditation|Backtrace:|abort\(\) was called|Task watchdog got triggered|rst:0x[0-9a-f]+ \((?:.*PANIC|.*WDT)"
 
 
+def run(cmd: list[str]) -> subprocess.CompletedProcess:
+    return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600)
+
+
+# esptool resets the chip after flashing ("--after hard-reset"), so the sketch boots once
+# before the capture below pulses EN again. A sketch that writes cards can then be cut off
+# mid-write by that second reset. Where the board's upload arguments allow it, flash with
+# "--after no-reset" instead (the chip waits in the ROM loader), so the EN pulse below is
+# the only boot.
+# The board defines the arguments under the tool key; arduino-cli resolves them to
+# upload.pattern_args before applying --upload-property, so the override uses that key.
+AFTER_RESET_KEY = "tools.esptool_py.upload.pattern_args"
+UPLOAD_ARGS_KEY = "upload.pattern_args"
+
+
+def no_reset_after_upload(fqbn: str, sketch: Path) -> list[str]:
+    props = run(["arduino-cli", "compile", "--fqbn", fqbn, "--show-properties=unexpanded", str(sketch)])
+    for line in props.stdout.splitlines():
+        key, sep, value = line.partition("=")
+        if sep and key == AFTER_RESET_KEY and "--after hard-reset" in value:
+            return ["--upload-property",
+                    f"{UPLOAD_ARGS_KEY}={value.replace('--after hard-reset', '--after no-reset')}"]
+    return []
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--example", required=True, help="examples/<Name>")
@@ -49,10 +74,11 @@ def main() -> int:
 
     sketch = ROOT / "examples" / args.example
     build = ROOT / "build" / "hil" / args.example
-    up = subprocess.run(
-        ["arduino-cli", "compile", "--fqbn", args.fqbn, "--library", str(ROOT), "--build-path", str(build),
-         "--upload", "-p", args.port, str(sketch)],
-        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600)
+    base = ["--fqbn", args.fqbn, "--library", str(ROOT), "--build-path", str(build)]
+    up = run(["arduino-cli", "compile", *base, str(sketch)])
+    if up.returncode == 0:
+        up = run(["arduino-cli", "upload", "--fqbn", args.fqbn, "--input-dir", str(build), "-p", args.port,
+                  *no_reset_after_upload(args.fqbn, sketch), str(sketch)])
     if up.returncode != 0:
         print(f"hil_check: upload of {args.example} to {args.port} failed:")
         print("\n".join((up.stdout + up.stderr).strip().splitlines()[-20:]))

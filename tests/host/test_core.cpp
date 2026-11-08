@@ -12,6 +12,9 @@
 #include "FakeHal.h"
 #include "pn5180/Iso14443a.h"
 #include "pn5180/MemTest.h"
+#include "pn5180/Ndef.h"
+#include "pn5180/NdefTlv.h"
+#include "pn5180/Type5Tag.h"
 #include "pn5180/Pn5180.h"
 #include "pn5180/Type2Tag.h"
 
@@ -571,8 +574,8 @@ void testType2Tag() {
         r.tag.mem[3][0] = 0x00;  // no CC magic
         Type2Tag fresh(r.nfc);
         T2tCapability cc;
-        EXPECT(fresh.capability(cc) == Status::CardError);
-        EXPECT(fresh.write(10, d) == Status::CardError);
+        EXPECT(fresh.capability(cc) == Status::NotFormatted);
+        EXPECT(fresh.write(10, d) == Status::NotFormatted);
         EXPECT(r.tag.writes == 0);
     }
     // MemTest: pass; pattern differs from the original; original restored.
@@ -784,6 +787,8 @@ void testMemTestRetry() {
     }
 }
 
+#include "NdefTests.inc"
+
 void testRecoveryPolicy() {
     EXPECT(requiresRecovery(Status::BusyTimeout));
     EXPECT(requiresRecovery(Status::IrqTimeout));
@@ -811,6 +816,7 @@ int main() {
     testIso15693();
     testType2Tag();
     testIso15693Memory();
+    testNdef();
     if (failures == 0) {
         std::printf("all tests passed\n");
         return 0;

@@ -28,6 +28,8 @@ enum class Status : uint8_t {
     CardError,         // card answered with an invalid / unexpected frame
     RfActiveError,     // RF_ON refused: external field detected (RF_ACTIVE_ERROR_IRQ)
     RfFieldTimeout,    // RF field did not come on (RF_STATUS.TX_RF_STATUS) in time
+    NotFormatted,      // card has no valid NFC Forum Capability Container (not NDEF formatted)
+    MalformedData,     // NDEF message or TLV structure (on the card or in a buffer) is invalid
 };
 
 // Human-readable name for logging. Never returns nullptr.

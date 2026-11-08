@@ -195,6 +195,14 @@ constexpr uint32_t kRxGainIso14443a106 = 0x2u;
 // two ISO 15693 cards stacked, 110 interleaved activations per setting,
 // 2026-11-04): MIN_LEVEL 3 failed 7/110 (garbage frames flagged as collision
 // / parity errors), MIN_LEVEL 5 failed 0/110.            DS Table 102, Table 172
+// Read range (NTAG215 alone, raised on non-metallic spacers, A = 0x430DC,
+// B = 0x450DC, both RX_GAIN 2, interleaved single activations without retry,
+// 100-200 per setting and height, 2026-11-07): 20-40 mm B 100 % in every run,
+// A 90-99 % (garbled frames = noise); 45 mm B 97 %, A 86 %. At the edge
+// (50-55 mm) both are unreliable and very sensitive to lateral card position;
+// B dropped out slightly earlier than A in two of four edge runs (A 18-72 %
+// there, mostly garbled). RX_GAIN 1 (MIN_LEVEL 3) read 65 % at 40 mm and 0 %
+// from 45 mm. Conclusion: MIN_LEVEL 5 costs only the unreliable edge of range.
 constexpr uint32_t kSigproMinLevelMask = 0xF000u;           // MIN_LEVEL  DS Table 102
 constexpr uint32_t kSigproMinLevelShift = 12;               // DS Table 102
 constexpr uint32_t kSigproMinLevelIso14443a106 = 5;         // measured, see above
