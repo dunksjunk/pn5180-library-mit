@@ -27,7 +27,9 @@ HIDE_UNDOC_MEMBERS     = NO
 HIDE_UNDOC_CLASSES     = NO
 HIDE_IN_BODY_DOCS      = YES
 INTERNAL_DOCS          = NO
-CASE_SENSE_NAMES       = YES
+# NO: output file names stay unique on case-insensitive filesystems
+# (Windows, macOS), where PN5180.h and pn5180/Pn5180.h would collide.
+CASE_SENSE_NAMES       = NO
 SORT_MEMBER_DOCS       = NO
 
 QUIET                  = YES
